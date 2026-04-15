@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: '24'
       
-      - name: Install dependencies
+      - name: Install dependencies 
         run: |
           npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
 
