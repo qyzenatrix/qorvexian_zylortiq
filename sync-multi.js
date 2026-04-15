@@ -14,6 +14,46 @@ const SYNC_ACCOUNT = process.env.SYNC_ACCOUNT;
 const SYNC_DAYS = parseInt(process.env.SYNC_DAYS) || 10950;
 const WHITELIST_PATH = 'public/config/whitelist.json';
 
+function writeEmailJsonSafe(targetFile, emailObj) {
+    let jsonString = JSON.stringify(emailObj, null, 2);
+    if (Buffer.byteLength(jsonString, 'utf8') > 20 * 1024 * 1024) {
+        console.warn(`  ⚠️ Email JSON exceeds 20MB! Truncating to fit Cloudflare limits...`);
+        emailObj.bodyHtml = '<p><b>[Email body too large. Truncated to fit within Cloudflare Pages limits.]</b></p>';
+        emailObj.body = '[Email body too large. Truncated to fit within Cloudflare Pages limits.]';
+        jsonString = JSON.stringify(emailObj, null, 2);
+    }
+    fs.writeFileSync(targetFile, jsonString);
+}
+
+function cleanupOversizedFiles() {
+    const rootDir = path.join('public', 'emails');
+    if (!fs.existsSync(rootDir)) return;
+    const stack = [rootDir];
+    while (stack.length > 0) {
+        const currentPath = stack.pop();
+        const items = fs.readdirSync(currentPath);
+        for (const item of items) {
+            const fullPath = path.join(currentPath, item);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+                stack.push(fullPath);
+            } else if (stat.isFile() && fullPath.endsWith('.json')) {
+                if (stat.size > 20 * 1024 * 1024) {
+                    console.log(`  🧹 Truncating oversized file: ${fullPath} (${(stat.size / 1024 / 1024).toFixed(2)} MB)`);
+                    try {
+                        const email = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+                        email.bodyHtml = '<p><b>[Email body too large. Truncated to fit within Cloudflare Pages limits.]</b></p>';
+                        email.body = '[Email body too large. Truncated to fit within Cloudflare Pages limits.]';
+                        fs.writeFileSync(fullPath, JSON.stringify(email, null, 2));
+                    } catch (e) {
+                        console.error(`  ❌ Failed to truncate ${fullPath}: ${e.message}`);
+                    }
+                }
+            }
+        }
+    }
+}
+
 function getRootDomain(email) {
     if (!email) return '';
     const parts = email.split('@');
@@ -261,7 +301,7 @@ async function syncAll() {
                     const targetDir = path.join('public', 'emails', String(year), month);
                     const targetFile = path.join(targetDir, `${email.id}.json`);
                     fs.mkdirSync(targetDir, { recursive: true });
-                    fs.writeFileSync(targetFile, JSON.stringify(email, null, 2));
+                    writeEmailJsonSafe(targetFile, email);
                     let fromEmailObj = email.from;
                     let fromEmail = '';
                     if (typeof fromEmailObj === 'string') {
@@ -276,7 +316,7 @@ async function syncAll() {
                         if (!email.labels) email.labels = [];
                         if (!email.labels.includes('junk')) email.labels.push('junk');
                     }
-                    fs.writeFileSync(targetFile, JSON.stringify(email, null, 2));
+                    writeEmailJsonSafe(targetFile, email);
                     searchIndex.emails.push({
                         id: email.id,
                         from: fromEmail,
@@ -303,6 +343,7 @@ async function syncAll() {
         console.log(`\nðŸ“… Pushing ${emailsToPush.length} whitelisted emails to calendar...`);
         for (const email of emailsToPush) await pushToCalendar(email);
     }
+    cleanupOversizedFiles();
     console.log('\nâœ… Unified sync complete!');
 }
 
@@ -405,14 +446,14 @@ async function syncKV(account, searchIndex, processedMessageIds, emailsToPush, c
                 const targetDir = path.join('public', 'emails', String(year), month);
                 const targetFile = path.join(targetDir, `${finalEmail.id}.json`);
                 fs.mkdirSync(targetDir, { recursive: true });
-                fs.writeFileSync(targetFile, JSON.stringify(finalEmail, null, 2));
+                writeEmailJsonSafe(targetFile, finalEmail);
                 if (isWhitelisted(finalEmail.from, whitelist)) emailsToPush.push(finalEmail);
                 else if (isBlacklisted(finalEmail.from, blacklist)) {
                     finalEmail.folder = 'junk';
                     if (!finalEmail.labels) finalEmail.labels = [];
                     if (!finalEmail.labels.includes('junk')) finalEmail.labels.push('junk');
                 }
-                fs.writeFileSync(targetFile, JSON.stringify(finalEmail, null, 2));
+                writeEmailJsonSafe(targetFile, finalEmail);
                 searchIndex.emails.push({
                     id: finalEmail.id,
                     from: finalEmail.from,
