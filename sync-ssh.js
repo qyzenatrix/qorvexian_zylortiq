@@ -153,7 +153,7 @@ async function runSSHCommand(config, command) {
         keyArgs = `-o StrictHostKeyChecking=no -o BatchMode=yes`; // Assumes SSH agent or default keys
     }
 
-    const sshCmd = `ssh ${keyArgs} -p ${port} ${user}@${host} "${command.replace(/"/g, '\\"')}"`;
+    const sshCmd = `ssh ${keyArgs} -p ${port} ${user}@${host} "${command.replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`;
     const { stdout } = await execAsync(sshCmd, { maxBuffer: 1024 * 1024 * 50 }); // 50MB buffer capacity
     return stdout;
 }
