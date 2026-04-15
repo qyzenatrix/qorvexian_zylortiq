@@ -189,7 +189,20 @@ async function syncEmailsSSH(customConfig = {}) {
         { name: 'sent', path: `${maildir}/.Sent/new/` }
     ];
 
+    const SSH_INDEX_PATH = path.join(config.outputDir || 'public', 'ssh-index.json');
+    let knownFiles = new Set();
+    try {
+        if (await fs.stat(SSH_INDEX_PATH).catch(() => false)) {
+            const indexData = await fs.readFile(SSH_INDEX_PATH, 'utf8');
+            knownFiles = new Set(JSON.parse(indexData));
+            console.log(`  [SSH Sync] Loaded ${knownFiles.size} known files from ssh-index.json`);
+        }
+    } catch (e) {
+        console.log(`  [SSH Sync] No existing ssh-index.json found or invalid. Starting fresh.`);
+    }
+
     const allEmails = [];
+    const newKnownFiles = new Set(knownFiles);
 
     for (const folder of foldersToSync) {
         console.log(`  [SSH Sync] Scanning ${folder.path} (last ${mtimeDays} days)...`);
@@ -201,43 +214,84 @@ async function syncEmailsSSH(customConfig = {}) {
             const files = fileListRaw.split('\n').filter(f => f.trim().length > 0);
 
             if (files.length === 0) {
-                console.log(`  [SSH Sync] No new emails found in ${folder.path}.`);
+                console.log(`  [SSH Sync] No files found in ${folder.path}.`);
                 continue;
             }
 
-            console.log(`  [SSH Sync] Found ${files.length} email files. Fetching...`);
+            // Limit bounding to max emails
+            const boundedFiles = files.slice(-(config.maxEmails || 3000));
             
-            // Limit the amount of files fetched
-            const fetchFiles = files.slice(-(config.maxEmails || 3000));
-
-            for (let i = 0; i < fetchFiles.length; i++) {
-                const filePath = fetchFiles[i];
-                if (i === 0 || (i + 1) % 20 === 0 || i === fetchFiles.length - 1) {
-                    console.log(`  [SSH Sync] Fetching file ${i + 1} of ${fetchFiles.length}...`);
-                }
-                
-                try {
-                    // Fetch individual file content
-                    const catCmd = `cat ${filePath}`;
-                    const rawEmail = await runSSHCommand(config, catCmd);
-                    
-                    const buffer = Buffer.from(rawEmail, 'utf8');
-                    const parsedData = await convertEmail(buffer, folder.name, config);
-                    
-                    if (new Date(parsedData.date) >= cutoffDate) {
-                        allEmails.push(parsedData);
-                    }
-                } catch (err) {
-                    console.error(`  [SSH Sync] Failed to parse email ${filePath}: ${err.message}`);
+            // Filter against known base names to avoid re-downloading
+            const fetchFiles = [];
+            for (const filePath of boundedFiles) {
+                const baseName = path.basename(filePath).split(':')[0];
+                if (!knownFiles.has(baseName)) {
+                    fetchFiles.push({ filePath, baseName });
                 }
             }
 
+            console.log(`  [SSH Sync] Found ${files.length} total files, ${fetchFiles.length} are new/unseen. Fetching...`);
+            if (fetchFiles.length === 0) continue;
+
+            // Process in chunks of 50 to reduce SSH connections
+            const chunkSize = 50;
+            for (let i = 0; i < fetchFiles.length; i += chunkSize) {
+                const chunk = fetchFiles.slice(i, i + chunkSize);
+                console.log(`  [SSH Sync] Fetching batch ${Math.floor(i/chunkSize) + 1} of ${Math.ceil(fetchFiles.length/chunkSize)}...`);
+                
+                try {
+                    const chunkFilesEscaped = chunk.map(f => `"${f.filePath.replace(/"/g, '\\"')}"`).join(' ');
+                    const catCmd = `for f in ${chunkFilesEscaped}; do echo "===EMAIL_DELIM_START==="; echo "$f"; cat "$f"; echo "===EMAIL_DELIM_END==="; done`;
+                    
+                    const rawOutput = await runSSHCommand(config, catCmd);
+                    const parts = rawOutput.split("===EMAIL_DELIM_START===\n");
+                    
+                    for (const part of parts) {
+                        if (!part.trim()) continue;
+                        
+                        const endIndex = part.lastIndexOf("\n===EMAIL_DELIM_END===");
+                        if (endIndex === -1) continue;
+                        
+                        const contentWithFilename = part.substring(0, endIndex);
+                        const firstNewline = contentWithFilename.indexOf("\n");
+                        if (firstNewline === -1) continue;
+                        
+                        const filePath = contentWithFilename.substring(0, firstNewline).trim();
+                        const rawEmail = contentWithFilename.substring(firstNewline + 1);
+                        
+                        try {
+                            const buffer = Buffer.from(rawEmail, 'utf8');
+                            const parsedData = await convertEmail(buffer, folder.name, config);
+                            
+                            const baseItem = chunk.find(c => c.filePath === filePath);
+                            if (baseItem) {
+                                newKnownFiles.add(baseItem.baseName);
+                            }
+                            
+                            if (new Date(parsedData.date) >= cutoffDate) {
+                                allEmails.push(parsedData);
+                            }
+                        } catch (err) {
+                            console.error(`  [SSH Sync] Failed to parse email ${filePath}: ${err.message}`);
+                        }
+                    }
+                } catch (e) {
+                    console.error(`  [SSH Sync] Error fetching batch ${Math.floor(i/chunkSize) + 1}: ${e.message}`);
+                }
+            }
         } catch (e) {
             console.error(`  [SSH Sync] Error scanning folder ${folder.path}: ${e.message}`);
         }
     }
 
-    console.log(`  [SSH Sync] Successfully fetched ${allEmails.length} emails from server.`);
+    try {
+        await fs.writeFile(SSH_INDEX_PATH, JSON.stringify(Array.from(newKnownFiles)));
+        console.log(`  [SSH Sync] Saved ${newKnownFiles.size} base names to ssh-index.json`);
+    } catch (e) {
+        console.error(`  [SSH Sync] Failed to save ssh-index.json: ${e.message}`);
+    }
+
+    console.log(`  [SSH Sync] Successfully fetched ${allEmails.length} new emails from server.`);
     return allEmails;
 }
 
