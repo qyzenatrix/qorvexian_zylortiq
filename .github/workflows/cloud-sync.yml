@@ -92,9 +92,10 @@ jobs:
           git diff --staged --quiet && echo "Nothing new to commit" && exit 0
 
           git commit -m "Sync emails $(date +'%Y-%m-%d %H:%M UTC')"
+          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
           git push \
             "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git" \
-            main
+            "${DEFAULT_BRANCH}"
               
       - name: Generate summary report
         if: always()
