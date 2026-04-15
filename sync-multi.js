@@ -262,7 +262,13 @@ async function syncAll() {
                     const targetFile = path.join(targetDir, `${email.id}.json`);
                     fs.mkdirSync(targetDir, { recursive: true });
                     fs.writeFileSync(targetFile, JSON.stringify(email, null, 2));
-                    const fromEmail = email.from?.email || email.from || '';
+                    let fromEmailObj = email.from;
+                    let fromEmail = '';
+                    if (typeof fromEmailObj === 'string') {
+                        fromEmail = fromEmailObj;
+                    } else if (fromEmailObj) {
+                        fromEmail = fromEmailObj.email || '';
+                    }
                     if (isWhitelisted(fromEmail, whitelist)) {
                         emailsToPush.push(email);
                     } else if (isBlacklisted(fromEmail, blacklist)) {
@@ -274,7 +280,7 @@ async function syncAll() {
                     searchIndex.emails.push({
                         id: email.id,
                         from: fromEmail,
-                        fromName: email.from?.name || fromEmail.split('@')[0],
+                        fromName: email.from?.name || (fromEmail && typeof fromEmail === 'string' ? fromEmail.split('@')[0] : 'Unknown'),
                         to: email.to,
                         subject: email.subject,
                         preview: email.preview,
