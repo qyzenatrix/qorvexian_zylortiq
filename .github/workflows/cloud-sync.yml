@@ -1,0 +1,193 @@
+name: Sync Emails with AI Spam Filter
+
+on:
+  push:
+    branches:
+      - master
+  schedule:
+    # Every 6 hours
+    #- cron: '0 */6 * * *'
+  
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      force_full_sync:
+        description: 'Force full sync (ignore cache)'
+        required: false
+        type: boolean
+        default: false
+      disable_ai_filter:
+        description: 'Disable AI spam filter'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: email-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-emails:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DISABLE_SYNC: ${{ secrets.DISABLE_SYNC || 'false' }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: |
+          npm install --no-save node-imap mailparser @anthropic-ai/sdk
+      
+      - name: Sync emails directly into private repo
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }} 
+          SYNC_FOLDERS: ${{ secrets.SYNC_FOLDERS || 'INBOX,Sent' }}
+          SYNC_DAYS: ${{ secrets.SYNC_DAYS || '3' }}
+          MAX_ATTACHMENT_SIZE: ${{ secrets.MAX_ATTACHMENT_SIZE || '524288' }}
+          HOTMAIL_IMAP_PASS: ${{ secrets.HOTMAIL_IMAP_PASS }}
+          SUPERESOLUTIONS_IMAP_PASS: ${{ secrets.SUPERESOLUTIONS_IMAP_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WHITELIST_DOMAINS: ${{ secrets.WHITELIST_DOMAINS }}
+          WHITELIST_SENDERS: ${{ secrets.WHITELIST_SENDERS }}
+          WHITELIST_KEYWORDS: ${{ secrets.WHITELIST_KEYWORDS }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_MAILDIR: ${{ secrets.SSH_MAILDIR }}
+        run: |
+          # Clone the private repo into /tmp
+          git clone --depth=1 \
+            https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git \
+            /tmp/private-emails
+
+          # Tell sync-multi.js to write emails here instead of public/
+          export OUTPUT_DIR=/tmp/private-emails/public
+
+          # Run the sync
+          node sync-multi.js
+
+          # Commit and push to the private repo
+          cd /tmp/private-emails
+          git config user.name "Email Sync Bot"
+          git config user.email "bot@sync"
+          git add .
+          git diff --staged --quiet && echo "Nothing new to commit" && exit 0
+
+          COMMIT_MSG="Sync emails $(date +'%Y-%m-%d %H:%M UTC')"
+          git commit -m "$COMMIT_MSG"
+          git push https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git main
+      
+      - name: Generate summary report
+        if: always()
+        run: |
+          echo "## Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f public/metadata.json ]; then
+            TOTAL_EMAILS=$(jq -r '.totalEmails' public/metadata.json)
+            LAST_SYNC=$(jq -r '.lastSync' public/metadata.json)
+            echo "- **Total Emails:** $TOTAL_EMAILS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Last Sync:** $LAST_SYNC" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f public/filter-log.json ]; then
+            DELETED=$(jq -r '.stats.deleted' public/filter-log.json)
+            KEPT=$(jq -r '.stats.kept' public/filter-log.json)
+            echo "- **Spam Filtered:** $DELETED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Emails Kept:** $KEPT" >> $GITHUB_STEP_SUMMARY
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Filter Breakdown" >> $GITHUB_STEP_SUMMARY
+            jq -r '.stats | "- Whitelisted: \(.whitelisted)\n- Rule-based: \(.ruleFiltered)\n- AI-filtered: \(.aiFiltered)"' public/filter-log.json >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "No new emails to commit"
+          else
+            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "New emails found, will commit"
+          fi
+      
+      - name: Commit and push changes
+        if: steps.check_changes.outputs.changes == 'true'
+        run: |
+          git config user.name "CloudMail Sync Bot"
+          git config user.email "sync@cloudmail.dev"
+          
+          # Discard accidental changes to package files from npm install
+          git checkout package.json package-lock.json 2>/dev/null || true
+          
+          # Stage and commit
+          git add public/
+          
+          COMMIT_MSG="Sync emails $(date +'%Y-%m-%d %H:%M UTC')"
+          if [ -f public/metadata.json ]; then
+            TOTAL=$(jq -r '.totalEmails' public/metadata.json)
+            COMMIT_MSG="$COMMIT_MSG - $TOTAL emails"
+          fi
+          if [ -f public/filter-log.json ]; then
+            DELETED=$(jq -r '.stats.deleted' public/filter-log.json)
+            COMMIT_MSG="$COMMIT_MSG ($DELETED spam filtered)"
+          fi
+          
+          git commit -m "$COMMIT_MSG"
+          
+          # Retry push up to 5 times, rebasing on each conflict
+          for i in 1 2 3 4 5; do
+            echo "Push attempt $i..."
+            if git push origin master; then
+              echo "Push succeeded on attempt $i"
+              exit 0
+            fi
+            echo "Push failed, fetching and rebasing..."
+            git fetch origin master
+            # Rebase our commit on top of the new remote, keeping ours for search-index conflicts
+            if ! git rebase origin/master; then
+              git checkout --ours public/search-index.json 2>/dev/null || true
+              git add public/search-index.json 2>/dev/null || true
+              git rebase --continue || git rebase --skip
+            fi
+            sleep $((i * 2))
+          done
+          
+          echo "::error::Failed to push after 5 attempts"
+          exit 1
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Email sync failed! Check the logs for details."
+          echo "## Sync Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The email sync encountered an error. Please check the workflow logs." >> $GITHUB_STEP_SUMMARY
+      
+      - name: Repository size check
+        if: always()
+        run: |
+          REPO_SIZE=$(du -sh . | cut -f1)
+          echo "Repository size: $REPO_SIZE"
+          echo "- **Repository Size:** $REPO_SIZE" >> $GITHUB_STEP_SUMMARY
+          
+          REPO_SIZE_MB=$(du -sm . | cut -f1)
+          if [ $REPO_SIZE_MB -gt 4096 ]; then
+            echo "::warning::Repository size is approaching 5GB limit. Consider archiving old emails."
+            echo "**Warning:** Repository is approaching GitHub's 5GB limit" >> $GITHUB_STEP_SUMMARY
+          fi
