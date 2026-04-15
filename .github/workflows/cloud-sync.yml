@@ -44,7 +44,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          npm install --no-save node-imap mailparser @anthropic-ai/sdk
+          npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
       
       - name: Sync emails directly into private repo
         env:
