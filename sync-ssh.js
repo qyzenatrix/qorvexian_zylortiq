@@ -211,7 +211,7 @@ async function syncEmailsSSH(customConfig = {}) {
             // Find recent files
             const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays}`;
             const fileListRaw = await runSSHCommand(config, findCmd);
-            const files = fileListRaw.split('\n').filter(f => f.trim().length > 0);
+            const files = fileListRaw.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 0);
 
             if (files.length === 0) {
                 console.log(`  [SSH Sync] No files found in ${folder.path}.`);
