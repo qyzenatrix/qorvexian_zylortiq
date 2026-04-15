@@ -65,39 +65,37 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_MAILDIR: ${{ secrets.SSH_MAILDIR }}
         run: |
-          # Explicitly read from env to confirm value exists
           if [ -z "$PRIVATE_REPO_PAT" ]; then
-            echo "::error::PRIVATE_REPO_PAT secret is empty or not set"
-            exit 1
-          fi
-          if [ -z "$PRIVATE_REPO" ]; then
-            echo "::error::PRIVATE_REPO secret is empty or not set"
+            echo "::error::PRIVATE_REPO_PAT is empty"
             exit 1
           fi
 
           echo "Cloning ${PRIVATE_REPO}..."
-
-          # Use env var directly — do NOT quote inside the URL
           git clone --depth=1 \
             "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git" \
             /tmp/private-emails
 
-          export OUTPUT_DIR=/tmp/private-emails/public
+          # Copy the scripts into the private repo folder so relative paths work
+          cp sync-multi.js sync-ssh.js sync-imap.js /tmp/private-emails/
+          cd /tmp/private-emails
+
+          # Install dependencies here too
+          npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
+
+          export OUTPUT_DIR=public
+
           node sync-multi.js
 
-          cd /tmp/private-emails
           git config user.name "Email Sync Bot"
           git config user.email "bot@sync"
           git add .
           git diff --staged --quiet && echo "Nothing new to commit" && exit 0
 
           git commit -m "Sync emails $(date +'%Y-%m-%d %H:%M UTC')"
-
-          # Also use env var in the push URL
           git push \
             "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git" \
             main
-      
+              
       - name: Generate summary report
         if: always()
         run: |
