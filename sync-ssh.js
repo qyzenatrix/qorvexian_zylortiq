@@ -241,23 +241,24 @@ async function syncEmailsSSH(customConfig = {}) {
                 
                 try {
                     const chunkFilesEscaped = chunk.map(f => `"${f.filePath.replace(/"/g, '\\"')}"`).join(' ');
-                    const catCmd = `for f in ${chunkFilesEscaped}; do echo "===EMAIL_DELIM_START==="; echo "$f"; cat "$f"; echo "===EMAIL_DELIM_END==="; done`;
+                    const catCmd = `for f in ${chunkFilesEscaped}; do echo ""; echo "===EMAIL_DELIM_START==="; echo "$f"; echo "===FILENAME_END==="; cat "$f"; echo ""; echo "===EMAIL_DELIM_END==="; done`;
                     
                     const rawOutput = await runSSHCommand(config, catCmd);
-                    const parts = rawOutput.split(/===EMAIL_DELIM_START===\r?\n/);
+                    const parts = rawOutput.split("===EMAIL_DELIM_START===");
                     
                     for (const part of parts) {
                         if (!part.trim()) continue;
                         
-                        const endMatch = part.match(/\r?\n===EMAIL_DELIM_END===/);
-                        if (!endMatch) continue;
+                        const filenameEndIdx = part.indexOf("===FILENAME_END===");
+                        const endIdx = part.indexOf("===EMAIL_DELIM_END===");
                         
-                        const contentWithFilename = part.substring(0, endMatch.index);
-                        const firstNewlineMatch = contentWithFilename.match(/\r?\n/);
-                        if (!firstNewlineMatch) continue;
+                        if (filenameEndIdx === -1 || endIdx === -1) {
+                            console.error(`  [SSH Sync] Error: Malformed chunk, missing delimiters.`);
+                            continue;
+                        }
                         
-                        const filePath = contentWithFilename.substring(0, firstNewlineMatch.index).trim();
-                        const rawEmail = contentWithFilename.substring(firstNewlineMatch.index + firstNewlineMatch[0].length);
+                        const filePath = part.substring(0, filenameEndIdx).trim();
+                        const rawEmail = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
                         
                         try {
                             const buffer = Buffer.from(rawEmail, 'utf8');
