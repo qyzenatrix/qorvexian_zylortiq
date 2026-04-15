@@ -3,10 +3,7 @@ name: Sync Emails with AI Spam Filter
 on:
   push:
     branches:
-      - main
-  schedule:
-    # Every 6 hours
-    - cron: '0 */6 * * *'  
+      - main 
   # Allow manual trigger
   workflow_dispatch:
     inputs:
