@@ -208,8 +208,8 @@ async function syncEmailsSSH(customConfig = {}) {
         console.log(`  [SSH Sync] Scanning ${folder.path} (last ${mtimeDays} days)...`);
         
         try {
-            // Find recent files
-            const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays}`;
+            // Find recent files (ignore files > 50MB)
+            const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays} ! -size +50M`;
             const fileListRaw = await runSSHCommand(config, findCmd);
             const files = fileListRaw.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 0);
 
