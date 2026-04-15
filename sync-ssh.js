@@ -218,19 +218,19 @@ async function syncEmailsSSH(customConfig = {}) {
                 continue;
             }
 
-            // Limit bounding to max emails
-            const boundedFiles = files.slice(-(config.maxEmails || 3000));
-            
             // Filter against known base names to avoid re-downloading
-            const fetchFiles = [];
-            for (const filePath of boundedFiles) {
+            const allUnseen = [];
+            for (const filePath of files) {
                 const baseName = path.basename(filePath).split(':')[0];
                 if (!knownFiles.has(baseName)) {
-                    fetchFiles.push({ filePath, baseName });
+                    allUnseen.push({ filePath, baseName });
                 }
             }
 
-            console.log(`  [SSH Sync] Found ${files.length} total files, ${fetchFiles.length} are new/unseen. Fetching...`);
+            // Limit bounding to max emails so we don't overload a single run
+            const fetchFiles = allUnseen.slice(0, config.maxEmails || 30000);
+
+            console.log(`  [SSH Sync] Found ${files.length} total files, ${allUnseen.length} are new/unseen. Fetching ${fetchFiles.length}...`);
             if (fetchFiles.length === 0) continue;
 
             // Process in chunks of 50 to reduce SSH connections
