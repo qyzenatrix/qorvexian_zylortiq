@@ -27,8 +27,14 @@ function getRootDomain(email) {
 }
 
 function isWhitelisted(email, whitelist) {
-    if (!email) return false;
-    const lowerEmail = email.toLowerCase().trim();
+    if (!email || !whitelist) return false;
+    let emailAddr = typeof email === 'string' ? email : (email.email || email.address || '');
+    if (!emailAddr) return false;
+    if (emailAddr.includes('<')) {
+        const match = emailAddr.match(/<([^>]+)>/);
+        if (match) emailAddr = match[1];
+    }
+    const lowerEmail = emailAddr.toLowerCase().trim();
     if (whitelist.emails.some(e => e.toLowerCase().trim() === lowerEmail)) return true;
     const domain = lowerEmail.split('@')[1];
     if (!domain) return false;
