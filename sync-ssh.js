@@ -154,7 +154,7 @@ async function runSSHCommand(config, command) {
     }
 
     const sshCmd = `ssh ${keyArgs} -p ${port} ${user}@${host} "${command.replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`;
-    const { stdout } = await execAsync(sshCmd, { maxBuffer: 1024 * 1024 * 50 }); // 50MB buffer capacity
+    const { stdout } = await execAsync(sshCmd, { maxBuffer: 1024 * 1024 * 500 }); // 500MB buffer capacity
     return stdout;
 }
 
@@ -233,8 +233,8 @@ async function syncEmailsSSH(customConfig = {}) {
             console.log(`  [SSH Sync] Found ${files.length} total files, ${allUnseen.length} are new/unseen. Fetching ${fetchFiles.length}...`);
             if (fetchFiles.length === 0) continue;
 
-            // Process in chunks of 50 to reduce SSH connections
-            const chunkSize = 50;
+            // Process in chunks of 10 to reduce SSH connection payloads and prevent maxBuffer crashes
+            const chunkSize = 10;
             for (let i = 0; i < fetchFiles.length; i += chunkSize) {
                 const chunk = fetchFiles.slice(i, i + chunkSize);
                 console.log(`  [SSH Sync] Fetching batch ${Math.floor(i/chunkSize) + 1} of ${Math.ceil(fetchFiles.length/chunkSize)}...`);
