@@ -258,7 +258,9 @@ async function syncEmailsSSH(customConfig = {}) {
                         }
                         
                         const filePath = part.substring(0, filenameEndIdx).trim();
-                        const rawEmail = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
+                        let rawEmail = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
+                        // Strip leading newlines injected by the echo command so mailparser can read headers
+                        rawEmail = rawEmail.replace(/^[\r\n]+/, '');
                         
                         try {
                             const buffer = Buffer.from(rawEmail, 'utf8');
