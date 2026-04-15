@@ -244,20 +244,20 @@ async function syncEmailsSSH(customConfig = {}) {
                     const catCmd = `for f in ${chunkFilesEscaped}; do echo "===EMAIL_DELIM_START==="; echo "$f"; cat "$f"; echo "===EMAIL_DELIM_END==="; done`;
                     
                     const rawOutput = await runSSHCommand(config, catCmd);
-                    const parts = rawOutput.split("===EMAIL_DELIM_START===\n");
+                    const parts = rawOutput.split(/===EMAIL_DELIM_START===\r?\n/);
                     
                     for (const part of parts) {
                         if (!part.trim()) continue;
                         
-                        const endIndex = part.lastIndexOf("\n===EMAIL_DELIM_END===");
-                        if (endIndex === -1) continue;
+                        const endMatch = part.match(/\r?\n===EMAIL_DELIM_END===/);
+                        if (!endMatch) continue;
                         
-                        const contentWithFilename = part.substring(0, endIndex);
-                        const firstNewline = contentWithFilename.indexOf("\n");
-                        if (firstNewline === -1) continue;
+                        const contentWithFilename = part.substring(0, endMatch.index);
+                        const firstNewlineMatch = contentWithFilename.match(/\r?\n/);
+                        if (!firstNewlineMatch) continue;
                         
-                        const filePath = contentWithFilename.substring(0, firstNewline).trim();
-                        const rawEmail = contentWithFilename.substring(firstNewline + 1);
+                        const filePath = contentWithFilename.substring(0, firstNewlineMatch.index).trim();
+                        const rawEmail = contentWithFilename.substring(firstNewlineMatch.index + firstNewlineMatch[0].length);
                         
                         try {
                             const buffer = Buffer.from(rawEmail, 'utf8');
