@@ -241,7 +241,7 @@ async function syncEmailsSSH(customConfig = {}) {
                 
                 try {
                     const chunkFilesEscaped = chunk.map(f => `"${f.filePath.replace(/"/g, '\\"')}"`).join(' ');
-                    const catCmd = `for f in ${chunkFilesEscaped}; do echo ""; echo "===EMAIL_DELIM_START==="; echo "$f"; echo "===FILENAME_END==="; cat "$f"; echo ""; echo "===EMAIL_DELIM_END==="; done`;
+                    const catCmd = `for f in ${chunkFilesEscaped}; do echo "===EMAIL_DELIM_START==="; echo "$f"; echo "===FILENAME_END==="; base64 "$f" 2>/dev/null; echo "===EMAIL_DELIM_END==="; done`;
                     
                     const rawOutput = await runSSHCommand(config, catCmd);
                     const parts = rawOutput.split("===EMAIL_DELIM_START===");
@@ -258,12 +258,18 @@ async function syncEmailsSSH(customConfig = {}) {
                         }
                         
                         const filePath = part.substring(0, filenameEndIdx).trim();
-                        let rawEmail = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
-                        // Strip leading newlines injected by the echo command so mailparser can read headers
-                        rawEmail = rawEmail.replace(/^[\r\n]+/, '');
+                        
+                        let rawEmailBase64 = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
+                        // Clean any whitespace/newlines from the base64 string
+                        rawEmailBase64 = rawEmailBase64.replace(/\s+/g, '');
+                        
+                        if (rawEmailBase64.length === 0) {
+                            console.error(`  [SSH Sync] Error: Empty base64 payload for ${filePath}. File might be missing or unreadable.`);
+                            continue;
+                        }
                         
                         try {
-                            const buffer = Buffer.from(rawEmail, 'utf8');
+                            const buffer = Buffer.from(rawEmailBase64, 'base64');
                             const parsedData = await convertEmail(buffer, folder.name, config);
                             
                             const baseItem = chunk.find(c => c.filePath === filePath);
