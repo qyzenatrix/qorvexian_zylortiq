@@ -10,7 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
-const MAX_JSON_BYTES = 80 * 1024 * 1024; // 80 MB safety margin (GitHub hard limit is 100 MB)
+const MAX_JSON_BYTES = 23 * 1024 * 1024; // 80 MB safety margin (GitHub hard limit is 100 MB)
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
