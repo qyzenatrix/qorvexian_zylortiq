@@ -1,9 +1,9 @@
 name: Sync Emails with AI Spam Filter
 
 on:
-  push:
-    branches:
-      - main 
+  # push:
+  #   branches:
+  #     - main 
   # Allow manual trigger 
   workflow_dispatch:
     inputs:
