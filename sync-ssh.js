@@ -10,7 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
-const MAX_JSON_BYTES = 20 * 1024 * 1024; // 23 MB — stays under Cloudflare Pages' 25 MiB per-file limit
+const MAX_JSON_BYTES = 20 * 1024 * 1024; // 20 MB — safe margin under Cloudflare Pages' 25 MiB per-file limit
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
@@ -211,14 +211,14 @@ async function resolveMaildir(config, userHint) {
 }
 
 /**
- * Estimate JSON byte size of an array of emails (fast approximation, 5% safety buffer).
+ * Exact JSON byte size of an array of emails.
  */
-function estimateJsonBytes(emails) {
-  const sample = emails.slice(0, 20);
-  if (sample.length === 0) return 0;
-  const sampleBytes = Buffer.byteLength(JSON.stringify(sample), 'utf8');
-  return Math.ceil((sampleBytes / sample.length) * emails.length * 1.25);
+function exactJsonBytes(emails) {
+  if (emails.length === 0) return 0;
+  return Buffer.byteLength(JSON.stringify(emails), 'utf8');
 }
+// alias so existing call-sites still work
+const estimateJsonBytes = exactJsonBytes;
 
 /**
  * Group emails by calendar year-month. Returns Map<"YYYY-MM", Email[]>.
@@ -236,27 +236,37 @@ function groupEmailsByYearMonth(emails) {
 
 /**
  * Build repo chunks respecting both MAX_FILES_PER_REPO and MAX_JSON_BYTES.
- * Splits at month granularity — never splits within a single month.
+ * Uses exact per-month byte sizes summed incrementally — never splits within a single month.
  */
 function buildRepoChunks(byYearMonth) {
   const sortedKeys = [...byYearMonth.keys()].sort();
   const chunks = [];
   let current = null;
+  let currentBytes = 0;
 
   for (const key of sortedKeys) {
     const keyEmails = byYearMonth.get(key);
+    // Exact size of this month's emails as a JSON array
+    const keyBytes  = exactJsonBytes(keyEmails);
+
     if (!current) {
-      current = { keys: [key], emails: [...keyEmails] };
+      current      = { keys: [key], emails: [...keyEmails] };
+      currentBytes = keyBytes;
     } else {
-      const combined = [...current.emails, ...keyEmails];
-      const overCount = combined.length > MAX_FILES_PER_REPO;
-      const overSize  = estimateJsonBytes(combined) > MAX_JSON_BYTES;
+      const combinedCount = current.emails.length + keyEmails.length;
+      // Sum of parts slightly over-estimates (missing outer [] merging overhead)
+      // but that is the safe direction — better to split too early than too late.
+      const combinedBytes = currentBytes + keyBytes;
+      const overCount = combinedCount > MAX_FILES_PER_REPO;
+      const overSize  = combinedBytes  > MAX_JSON_BYTES;
       if (overCount || overSize) {
         chunks.push(current);
-        current = { keys: [key], emails: [...keyEmails] };
+        current      = { keys: [key], emails: [...keyEmails] };
+        currentBytes = keyBytes;
       } else {
         current.keys.push(key);
         current.emails.push(...keyEmails);
+        currentBytes = combinedBytes;
       }
     }
   }
