@@ -135,6 +135,112 @@ async function runSSHCommand(config, command) {
 }
 
 /**
+ * Try common Webuzo/cPanel/Plesk/generic maildir locations and return the
+ * first that exists on the remote server.
+ *
+ * @param {object} config  - full sync config (needs config.ssh)
+ * @param {string} userHint - SSH_MAILDIR value: either an email address like
+ *                            "junozhou@xotours.net" or an absolute path that
+ *                            failed the existence check.
+ * @returns {string} resolved absolute maildir path
+ */
+async function resolveMaildir(config, userHint) {
+  // Parse hint into parts whether it's "user@domain" or "/some/path/user"
+  const isEmail = userHint.includes('@') && !userHint.startsWith('/');
+  let localPart, domain, sysUser;
+
+  if (isEmail) {
+    [localPart, domain] = userHint.split('@');
+    sysUser = localPart;
+  } else {
+    // Absolute path that didn't exist — derive hints from the path segments
+    const segments = userHint.replace(/\/$/, '').split('/');
+    localPart = segments[segments.length - 1];
+    // Try to guess domain from second-to-last segment if it looks like one
+    const maybeD = segments[segments.length - 2] || '';
+    domain = maybeD.includes('.') ? maybeD : '';
+    sysUser = localPart;
+  }
+
+  const candidates = [
+    // ── Primary cPanel/Webuzo account — mail lives directly under ~/mail ──
+    `/home/${sysUser}/mail`,
+    `/home/xotours/mail`,
+
+    // ── Webuzo / Dovecot vmail ────────────────────────────────────────────
+    domain && `/var/vmail/${domain}/${localPart}`,
+    domain && `/home/vmail/${domain}/${localPart}`,
+    `/var/vmail/${localPart}`,
+
+    // ── cPanel sub-account style ──────────────────────────────────────────
+    domain && `/home/${sysUser}/mail/${domain}/${localPart}`,
+    `/home/${sysUser}/Maildir`,
+
+    // ── Plesk ─────────────────────────────────────────────────────────────
+    domain && `/var/qmail/mailnames/${domain}/${localPart}/Maildir`,
+
+    // ── Webuzo sub-account under hosting home ─────────────────────────────
+    domain && `/home/xotours/mail/${domain}/${localPart}`,
+    `/home/xotours/mail/${localPart}`,
+
+    // ── Generic fallbacks ─────────────────────────────────────────────────
+    `/home/${localPart}/Maildir`,
+    `/var/mail/${localPart}`,
+    domain && `/mail/${domain}/${localPart}`,
+  ].filter(Boolean);
+
+  console.log(`  [SSH Sync] Auto-detecting maildir for "${userHint}"...`);
+  console.log(`  [SSH Sync] Will try ${candidates.length} candidate paths:`);
+
+  for (const candidate of candidates) {
+    try {
+      // A valid Maildir has at least a cur/ or new/ subdirectory
+      const checkCmd = `if [ -d "${candidate}/cur" ] || [ -d "${candidate}/new" ]; then echo "EXISTS"; else echo "MISSING"; fi`;
+      const result = await runSSHCommand(config, checkCmd);
+      if (result.trim() === 'EXISTS') {
+        console.log(`  [SSH Sync] ✓ Found maildir: ${candidate}`);
+        return candidate;
+      } else {
+        console.log(`  [SSH Sync]   ✗ ${candidate}`);
+      }
+    } catch (e) {
+      console.log(`  [SSH Sync]   ✗ ${candidate} (${e.message.split('\n')[0].trim()})`);
+    }
+  }
+
+  // ── Last resort: server-side find ─────────────────────────────────────
+  console.log(`  [SSH Sync] Running server-side find as last resort...`);
+  try {
+    const searchRoots = '/var/vmail /home/vmail /home /var/mail /mail';
+    const findCmd = `find ${searchRoots} -maxdepth 6 -type d -name 'cur' 2>/dev/null | grep -i '${localPart}' | head -10`;
+    const found = await runSSHCommand(config, findCmd);
+    const lines = found.split('\n').map(l => l.trim()).filter(Boolean);
+
+    if (lines.length > 0) {
+      // Prefer the match that also contains the domain name
+      const preferred = domain
+        ? lines.find(l => l.includes(domain)) || lines[0]
+        : lines[0];
+      const resolved = preferred.replace(/\/cur$/, '');
+      console.log(`  [SSH Sync] ✓ Server find resolved: ${resolved}`);
+      if (lines.length > 1) {
+        console.log(`  [SSH Sync]   Other candidates found:`);
+        lines.filter(l => l !== preferred).forEach(l => console.log(`  [SSH Sync]     ${l}`));
+      }
+      return resolved;
+    }
+  } catch (e) {
+    console.log(`  [SSH Sync]   Server-side find failed: ${e.message.split('\n')[0].trim()}`);
+  }
+
+  throw new Error(
+    `Could not find a valid Maildir for "${userHint}" on the remote server.\n` +
+    `Tried paths:\n  ${candidates.join('\n  ')}\n` +
+    `Fix: set SSH_MAILDIR to the correct absolute path (e.g. /var/vmail/xotours.net/junozhou).`
+  );
+}
+
+/**
  * Group emails by calendar year.
  * Returns: Map<number, Email[]>  e.g.  { 2022: [...], 2023: [...], 2024: [...] }
  */
@@ -150,23 +256,6 @@ function groupEmailsByYear(emails) {
 
 /**
  * Build repo chunks so no single repo exceeds MAX_FILES_PER_REPO.
- *
- * Strategy:
- *   - Walk years in ascending order.
- *   - Keep filling the "current" repo until adding the next year
- *     would push it past the limit — then seal it and open a new one.
- *   - A single year that is itself > MAX_FILES_PER_REPO gets its own
- *     dedicated repo (we never split inside a year).
- *
- * Returns an array of repo descriptors:
- * [
- *   { name: 'main',                  years: [2019,2020,2021], emails: [...] },
- *   { name: 'emails-archive-2022',   years: [2022],           emails: [...] },
- *   { name: 'emails-archive-2023',   years: [2023],           emails: [...] },
- * ]
- *
- * The first chunk is always named 'main'; subsequent chunks are named
- * 'emails-archive-YYYY' using the earliest year in that chunk.
  */
 function buildRepoChunks(byYear) {
   const sortedYears = [...byYear.keys()].sort((a, b) => a - b);
@@ -177,14 +266,11 @@ function buildRepoChunks(byYear) {
     const yearEmails = byYear.get(year);
 
     if (!current) {
-      // Start first chunk (always "main")
       current = { years: [year], emails: [...yearEmails] };
     } else if (current.emails.length + yearEmails.length <= MAX_FILES_PER_REPO) {
-      // Fits in current chunk
       current.years.push(year);
       current.emails.push(...yearEmails);
     } else {
-      // Seal current chunk, start a new archive chunk
       chunks.push(current);
       current = { years: [year], emails: [...yearEmails] };
     }
@@ -192,7 +278,6 @@ function buildRepoChunks(byYear) {
 
   if (current) chunks.push(current);
 
-  // Assign names
   return chunks.map((chunk, idx) => ({
     name: idx === 0 ? 'main' : `emails-archive-${chunk.years[0]}`,
     years: chunk.years,
@@ -204,12 +289,6 @@ function buildRepoChunks(byYear) {
 
 /**
  * Write all repo output files plus a manifest.
- *
- * File layout inside outputDir:
- *   emails.json                    ← main repo (most-recent chunk)
- *   emails-archive-2022.json       ← archive repos
- *   emails-archive-2023.json
- *   manifest.json                  ← index of all repos for the frontend
  */
 async function writeRepoOutputs(chunks, outputDir) {
   await fs.mkdir(outputDir, { recursive: true });
@@ -224,7 +303,6 @@ async function writeRepoOutputs(chunks, outputDir) {
     const filename = chunk.name === 'main' ? 'emails.json' : `${chunk.name}.json`;
     const filepath = path.join(outputDir, filename);
 
-    // Sort newest-first within each repo
     const sorted = [...chunk.emails].sort((a, b) => new Date(b.date) - new Date(a.date));
 
     await fs.writeFile(filepath, JSON.stringify(sorted, null, 2));
@@ -239,7 +317,6 @@ async function writeRepoOutputs(chunks, outputDir) {
     });
   }
 
-  // Sort manifest repos newest-first for the frontend
   manifest.repos.sort((a, b) => b.yearEnd - a.yearEnd);
 
   const manifestPath = path.join(outputDir, 'manifest.json');
@@ -250,7 +327,7 @@ async function writeRepoOutputs(chunks, outputDir) {
 }
 
 /**
- * Fetch files directly via ssh cat stream
+ * Main SSH sync entry point.
  */
 async function syncEmailsSSH(customConfig = {}) {
   const config = { ...getDefaultConfig(), ...customConfig };
@@ -258,10 +335,35 @@ async function syncEmailsSSH(customConfig = {}) {
     config.ssh = { ...getDefaultConfig().ssh, ...customConfig.ssh };
   }
 
-  const maildir = config.ssh.maildir;
+  // ── Resolve maildir path ───────────────────────────────────────────────
+  let maildir = config.ssh.maildir;
   if (!maildir) {
-    throw new Error("SSH_MAILDIR or config.ssh.maildir must be provided to locate emails.");
+    throw new Error(
+      'SSH_MAILDIR must be set. Use an email address (e.g. junozhou@xotours.net) ' +
+      'or an absolute path (e.g. /var/vmail/xotours.net/junozhou).'
+    );
   }
+
+  if (!maildir.startsWith('/')) {
+    // Looks like an email address — auto-detect the path
+    maildir = await resolveMaildir(config, maildir);
+  } else {
+    // Absolute path provided — verify it actually exists on the server
+    try {
+      const checkCmd = `if [ -d "${maildir}/cur" ] || [ -d "${maildir}/new" ]; then echo "EXISTS"; else echo "MISSING"; fi`;
+      const result = await runSSHCommand(config, checkCmd);
+      if (result.trim() !== 'EXISTS') {
+        console.log(`  [SSH Sync] ⚠️  SSH_MAILDIR "${maildir}" not found — attempting auto-detect...`);
+        maildir = await resolveMaildir(config, maildir);
+      } else {
+        console.log(`  [SSH Sync] ✓ SSH_MAILDIR verified: ${maildir}`);
+      }
+    } catch (e) {
+      console.log(`  [SSH Sync] ⚠️  Could not verify SSH_MAILDIR — attempting auto-detect...`);
+      maildir = await resolveMaildir(config, maildir);
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────
 
   console.log(`\n  [SSH Sync] Connecting to ${config.ssh.user}@${config.ssh.host}:${config.ssh.port}`);
   console.log(`  [SSH Sync] Maildir Path: ${maildir}`);
@@ -381,7 +483,7 @@ async function syncEmailsSSH(customConfig = {}) {
 
   console.log(`  [SSH Sync] Fetched ${allEmails.length} new emails from server.`);
 
-  // ── Load Existing Emails ─────────────────────────────────────────────────
+  // ── Load Existing Emails ───────────────────────────────────────────────
   let existingEmails = [];
   const manifestPath = path.join(config.outputDir || 'public', 'manifest.json');
   try {
@@ -418,20 +520,18 @@ async function syncEmailsSSH(customConfig = {}) {
   }
   const finalAllEmails = Array.from(allMergedEmailsMap.values());
 
-  // ── Repo-splitting logic ─────────────────────────────────────────────────
+  // ── Repo-splitting logic ───────────────────────────────────────────────
   const totalFiles = finalAllEmails.length;
   console.log(`\n  [Repo Split] Total emails to store: ${totalFiles}`);
   console.log(`  [Repo Split] Limit per repo: ${MAX_FILES_PER_REPO}`);
 
   if (totalFiles <= MAX_FILES_PER_REPO) {
-    // No splitting needed — write a single emails.json as before
     console.log(`  [Repo Split] Under limit — writing single emails.json`);
     const sorted = [...finalAllEmails].sort((a, b) => new Date(b.date) - new Date(a.date));
     const outPath = path.join(config.outputDir, 'emails.json');
     await fs.mkdir(config.outputDir, { recursive: true });
     await fs.writeFile(outPath, JSON.stringify(sorted, null, 2));
 
-    // Write a minimal manifest so the frontend can work the same way regardless
     const manifest = {
       generatedAt: new Date().toISOString(),
       totalEmails: sorted.length,
@@ -446,7 +546,6 @@ async function syncEmailsSSH(customConfig = {}) {
     await fs.writeFile(path.join(config.outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`  [Repo Split] Done. Single repo, ${sorted.length} emails.`);
   } else {
-    // Split into year-based archive repos
     console.log(`  [Repo Split] Over limit — splitting by year into archive repos...`);
     const byYear = groupEmailsByYear(finalAllEmails);
     console.log(`  [Repo Split] Years found: ${[...byYear.keys()].sort().join(', ')}`);
@@ -457,7 +556,7 @@ async function syncEmailsSSH(customConfig = {}) {
     }
     await writeRepoOutputs(chunks, config.outputDir);
   }
-  // ────────────────────────────────────────────────────────────────────────
+  // ──────────────────────────────────────────────────────────────────────
 
   return finalAllEmails;
 }
