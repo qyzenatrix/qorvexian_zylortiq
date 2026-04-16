@@ -10,7 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
-const MAX_JSON_BYTES = 20 * 1024 * 1024; // 20 MB — safe margin under Cloudflare Pages' 25 MiB per-file limit
+const MAX_JSON_BYTES = 18 * 1024 * 1024; // 18 MB — safe margin under Cloudflare Pages' 25 MiB per-file limit
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
@@ -308,7 +308,7 @@ async function writeRepoOutputs(chunks, outputDir) {
     const filename = chunk.name === 'main' ? 'emails.json' : `${chunk.name}.json`;
     const filepath = path.join(outputDir, filename);
     const sorted = [...chunk.emails].sort((a, b) => new Date(b.date) - new Date(a.date));
-    await fs.writeFile(filepath, JSON.stringify(sorted, null, 2));
+    await fs.writeFile(filepath, JSON.stringify(sorted));
     console.log(`  [Repo Split] Wrote ${sorted.length} emails -> ${filename}`);
     manifest.repos.push({
       name:       chunk.name,
@@ -512,7 +512,7 @@ async function syncEmailsSSH(customConfig = {}) {
     console.log(`  [Repo Split] Under limits - writing single emails.json`);
     const sorted = [...finalAllEmails].sort((a, b) => new Date(b.date) - new Date(a.date));
     await fs.mkdir(config.outputDir, { recursive: true });
-    await fs.writeFile(path.join(config.outputDir, 'emails.json'), JSON.stringify(sorted, null, 2));
+    await fs.writeFile(path.join(config.outputDir, 'emails.json'), JSON.stringify(sorted));
     const manifest = {
       generatedAt: new Date().toISOString(),
       totalEmails: sorted.length,
