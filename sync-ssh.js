@@ -373,7 +373,13 @@ async function syncEmailsSSH(customConfig = {}) {
     { name: 'inbox', path: `${maildir}/new/` },
     { name: 'inbox', path: `${maildir}/cur/` },
     { name: 'sent',  path: `${maildir}/.Sent/cur/` },
-    { name: 'sent',  path: `${maildir}/.Sent/new/` }
+    { name: 'sent',  path: `${maildir}/.Sent/new/` },
+    { name: 'sent',  path: `${maildir}/.Sent Messages/cur/` },
+    { name: 'sent',  path: `${maildir}/.Sent Messages/new/` },
+    { name: 'sent',  path: `${maildir}/.Sent Items/cur/` },
+    { name: 'sent',  path: `${maildir}/.Sent Items/new/` },
+    { name: 'sent',  path: `${maildir}/.sent/cur/` },
+    { name: 'sent',  path: `${maildir}/.sent/new/` }
   ];
 
   const SSH_INDEX_PATH = path.join(config.outputDir || 'public', 'ssh-index.json');
@@ -394,7 +400,7 @@ async function syncEmailsSSH(customConfig = {}) {
   for (const folder of foldersToSync) {
     console.log(`  [SSH Sync] Scanning ${folder.path} (last ${mtimeDays} days)...`);
     try {
-      const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays} ! -size +25M`;
+      const findCmd = `find "${folder.path}" -type f -mtime -${mtimeDays} ! -size +25M`;
       const fileListRaw = await runSSHCommand(config, findCmd);
       const files = fileListRaw.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 0);
 
