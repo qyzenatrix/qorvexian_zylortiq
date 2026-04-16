@@ -10,7 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
-const MAX_JSON_BYTES = 23 * 1024 * 1024; // 80 MB safety margin (GitHub hard limit is 100 MB)
+const MAX_JSON_BYTES = 23 * 1024 * 1024; // 23 MB — stays under Cloudflare Pages' 25 MiB per-file limit
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
@@ -155,22 +155,16 @@ async function resolveMaildir(config, userHint) {
   }
 
   const candidates = [
-    // Primary cPanel/Webuzo account: mail lives directly under ~/mail
     `/home/${sysUser}/mail`,
     `/home/xotours/mail`,
-    // Webuzo / Dovecot vmail
     domain ? `/var/vmail/${domain}/${localPart}` : null,
     domain ? `/home/vmail/${domain}/${localPart}` : null,
     `/var/vmail/${localPart}`,
-    // cPanel sub-account
     domain ? `/home/${sysUser}/mail/${domain}/${localPart}` : null,
     `/home/${sysUser}/Maildir`,
-    // Plesk
     domain ? `/var/qmail/mailnames/${domain}/${localPart}/Maildir` : null,
-    // Webuzo sub-account
     domain ? `/home/xotours/mail/${domain}/${localPart}` : null,
     `/home/xotours/mail/${localPart}`,
-    // Generic
     `/home/${localPart}/Maildir`,
     `/var/mail/${localPart}`,
     domain ? `/mail/${domain}/${localPart}` : null,
@@ -193,7 +187,6 @@ async function resolveMaildir(config, userHint) {
     }
   }
 
-  // Last resort: server-side find
   console.log(`  [SSH Sync] Running server-side find as last resort...`);
   try {
     const searchRoots = '/var/vmail /home/vmail /home /var/mail /mail';
@@ -228,53 +221,65 @@ function estimateJsonBytes(emails) {
 }
 
 /**
- * Group emails by calendar year. Returns Map<number, Email[]>.
+ * Group emails by calendar year-month. Returns Map<"YYYY-MM", Email[]>.
  */
-function groupEmailsByYear(emails) {
-  const byYear = new Map();
+function groupEmailsByYearMonth(emails) {
+  const byYearMonth = new Map();
   for (const email of emails) {
-    const year = new Date(email.date).getFullYear();
-    if (!byYear.has(year)) byYear.set(year, []);
-    byYear.get(year).push(email);
+    const d = new Date(email.date);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (!byYearMonth.has(key)) byYearMonth.set(key, []);
+    byYearMonth.get(key).push(email);
   }
-  return byYear;
+  return byYearMonth;
 }
 
 /**
  * Build repo chunks respecting both MAX_FILES_PER_REPO and MAX_JSON_BYTES.
- * Never splits within a single year.
+ * Splits at month granularity — never splits within a single month.
  */
-function buildRepoChunks(byYear) {
-  const sortedYears = [...byYear.keys()].sort((a, b) => a - b);
+function buildRepoChunks(byYearMonth) {
+  const sortedKeys = [...byYearMonth.keys()].sort();
   const chunks = [];
   let current = null;
 
-  for (const year of sortedYears) {
-    const yearEmails = byYear.get(year);
+  for (const key of sortedKeys) {
+    const keyEmails = byYearMonth.get(key);
     if (!current) {
-      current = { years: [year], emails: [...yearEmails] };
+      current = { keys: [key], emails: [...keyEmails] };
     } else {
-      const combined = [...current.emails, ...yearEmails];
+      const combined = [...current.emails, ...keyEmails];
       const overCount = combined.length > MAX_FILES_PER_REPO;
       const overSize  = estimateJsonBytes(combined) > MAX_JSON_BYTES;
       if (overCount || overSize) {
         chunks.push(current);
-        current = { years: [year], emails: [...yearEmails] };
+        current = { keys: [key], emails: [...keyEmails] };
       } else {
-        current.years.push(year);
-        current.emails.push(...yearEmails);
+        current.keys.push(key);
+        current.emails.push(...keyEmails);
       }
     }
   }
   if (current) chunks.push(current);
 
-  return chunks.map((chunk, idx) => ({
-    name: idx === 0 ? 'main' : `emails-archive-${chunk.years[0]}`,
-    years: chunk.years,
-    emails: chunk.emails,
-    yearStart: Math.min(...chunk.years),
-    yearEnd: Math.max(...chunk.years),
-  }));
+  return chunks.map((chunk, idx) => {
+    const firstKey = chunk.keys[0];                        // e.g. "2021-03"
+    const lastKey  = chunk.keys[chunk.keys.length - 1];   // e.g. "2021-06"
+    const [yearStart, monthStart] = firstKey.split('-').map(Number);
+    const [yearEnd,   monthEnd  ] = lastKey.split('-').map(Number);
+    const label = firstKey === lastKey
+      ? firstKey              // single month:  "2021-03"
+      : `${firstKey}_${lastKey}`;  // range: "2021-03_2021-06"
+    return {
+      name: idx === 0 ? 'main' : `emails-archive-${label}`,
+      keys: chunk.keys,
+      emails: chunk.emails,
+      yearStart,
+      monthStart,
+      yearEnd,
+      monthEnd,
+    };
+  });
 }
 
 /**
@@ -296,15 +301,17 @@ async function writeRepoOutputs(chunks, outputDir) {
     await fs.writeFile(filepath, JSON.stringify(sorted, null, 2));
     console.log(`  [Repo Split] Wrote ${sorted.length} emails -> ${filename}`);
     manifest.repos.push({
-      name: chunk.name,
-      file: filename,
+      name:       chunk.name,
+      file:       filename,
       emailCount: sorted.length,
-      yearStart: chunk.yearStart,
-      yearEnd: chunk.yearEnd,
+      yearStart:  chunk.yearStart,
+      yearEnd:    chunk.yearEnd,
+      monthStart: chunk.monthStart ?? null,
+      monthEnd:   chunk.monthEnd   ?? null,
     });
   }
 
-  manifest.repos.sort((a, b) => b.yearEnd - a.yearEnd);
+  manifest.repos.sort((a, b) => b.yearEnd - a.yearEnd || b.monthEnd - a.monthEnd);
   await fs.writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   console.log(`  [Repo Split] Wrote manifest.json (${chunks.length} repo(s))`);
   return manifest;
@@ -319,7 +326,6 @@ async function syncEmailsSSH(customConfig = {}) {
     config.ssh = { ...getDefaultConfig().ssh, ...customConfig.ssh };
   }
 
-  // Resolve maildir path
   let maildir = config.ssh.maildir;
   if (!maildir) {
     throw new Error(
@@ -378,7 +384,6 @@ async function syncEmailsSSH(customConfig = {}) {
   for (const folder of foldersToSync) {
     console.log(`  [SSH Sync] Scanning ${folder.path} (last ${mtimeDays} days)...`);
     try {
-      // Skip files larger than 25 MB to avoid huge email/attachment payloads
       const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays} ! -size +25M`;
       const fileListRaw = await runSSHCommand(config, findCmd);
       const files = fileListRaw.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 0);
@@ -442,7 +447,6 @@ async function syncEmailsSSH(customConfig = {}) {
     }
   }
 
-  // Persist ssh-index
   try {
     await fs.writeFile(SSH_INDEX_PATH, JSON.stringify(Array.from(newKnownFiles)));
     console.log(`  [SSH Sync] Saved ${newKnownFiles.size} base names to ssh-index.json`);
@@ -484,7 +488,6 @@ async function syncEmailsSSH(customConfig = {}) {
   for (const email of allEmails)      allMergedEmailsMap.set(email.id, email);
   const finalAllEmails = Array.from(allMergedEmailsMap.values());
 
-  // Repo-splitting: enforce both count AND size limits
   const totalFiles     = finalAllEmails.length;
   const estimatedBytes = estimateJsonBytes(finalAllEmails);
   const estimatedMB    = (estimatedBytes / 1024 / 1024).toFixed(1);
@@ -504,28 +507,30 @@ async function syncEmailsSSH(customConfig = {}) {
       generatedAt: new Date().toISOString(),
       totalEmails: sorted.length,
       repos: [{
-        name: 'main',
-        file: 'emails.json',
+        name:       'main',
+        file:       'emails.json',
         emailCount: sorted.length,
-        yearStart: sorted.length ? new Date(sorted[sorted.length - 1].date).getFullYear() : null,
-        yearEnd:   sorted.length ? new Date(sorted[0].date).getFullYear() : null,
+        yearStart:  sorted.length ? new Date(sorted[sorted.length - 1].date).getFullYear() : null,
+        yearEnd:    sorted.length ? new Date(sorted[0].date).getFullYear() : null,
+        monthStart: sorted.length ? new Date(sorted[sorted.length - 1].date).getMonth() + 1 : null,
+        monthEnd:   sorted.length ? new Date(sorted[0].date).getMonth() + 1 : null,
       }]
     };
     await fs.writeFile(path.join(config.outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`  [Repo Split] Done. Single repo, ${sorted.length} emails.`);
   } else {
     if (totalFiles > MAX_FILES_PER_REPO)
-      console.log(`  [Repo Split] Over count limit (${totalFiles} > ${MAX_FILES_PER_REPO}) - splitting by year...`);
+      console.log(`  [Repo Split] Over count limit (${totalFiles} > ${MAX_FILES_PER_REPO}) - splitting by month...`);
     if (estimatedBytes > MAX_JSON_BYTES)
-      console.log(`  [Repo Split] Over size limit (${estimatedMB} MB > ${MAX_JSON_BYTES / 1024 / 1024} MB) - splitting by year...`);
+      console.log(`  [Repo Split] Over size limit (${estimatedMB} MB > ${MAX_JSON_BYTES / 1024 / 1024} MB) - splitting by month...`);
 
-    const byYear = groupEmailsByYear(finalAllEmails);
-    console.log(`  [Repo Split] Years found: ${[...byYear.keys()].sort().join(', ')}`);
-    const chunks = buildRepoChunks(byYear);
+    const byYearMonth = groupEmailsByYearMonth(finalAllEmails);
+    console.log(`  [Repo Split] Months found: ${[...byYearMonth.keys()].sort().join(', ')}`);
+    const chunks = buildRepoChunks(byYearMonth);
     console.log(`  [Repo Split] Will create ${chunks.length} repo(s):`);
     for (const c of chunks) {
       const cMB = (estimateJsonBytes(c.emails) / 1024 / 1024).toFixed(1);
-      console.log(`    -> ${c.name}  years: ${c.yearStart}-${c.yearEnd}  emails: ${c.emails.length}  ~${cMB} MB`);
+      console.log(`    -> ${c.name}  ${c.yearStart}-${String(c.monthStart).padStart(2,'0')} to ${c.yearEnd}-${String(c.monthEnd).padStart(2,'0')}  emails: ${c.emails.length}  ~${cMB} MB`);
     }
     await writeRepoOutputs(chunks, config.outputDir);
   }
