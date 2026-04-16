@@ -506,6 +506,17 @@ async function syncEmailsSSH(customConfig = {}) {
   console.log(`  [Repo Split] Estimated JSON size:   ${estimatedMB} MB`);
   console.log(`  [Repo Split] Limits: ${MAX_FILES_PER_REPO} emails / ${MAX_JSON_BYTES / 1024 / 1024} MB per file`);
 
+  try {
+    const oldFiles = await fs.readdir(config.outputDir);
+    for (const file of oldFiles) {
+      if (file === 'emails.json' || (file.startsWith('emails-archive-') && file.endsWith('.json'))) {
+        await fs.unlink(path.join(config.outputDir, file));
+      }
+    }
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`  [SSH Sync] Could not clean old outputs: ${e.message}`);
+  }
+
   const needsSplit = totalFiles > MAX_FILES_PER_REPO || estimatedBytes > MAX_JSON_BYTES;
 
   if (!needsSplit) {
