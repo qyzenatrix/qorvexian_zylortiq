@@ -10,6 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
+const MAX_JSON_BYTES = 80 * 1024 * 1024; // 80 MB safety margin (GitHub hard limit is 100 MB)
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
@@ -135,17 +136,10 @@ async function runSSHCommand(config, command) {
 }
 
 /**
- * Try common Webuzo/cPanel/Plesk/generic maildir locations and return the
- * first that exists on the remote server.
- *
- * @param {object} config  - full sync config (needs config.ssh)
- * @param {string} userHint - SSH_MAILDIR value: either an email address like
- *                            "junozhou@xotours.net" or an absolute path that
- *                            failed the existence check.
- * @returns {string} resolved absolute maildir path
+ * Try common Webuzo/cPanel/Plesk/generic maildir locations.
+ * SSH_MAILDIR can be an email address (junozhou@xotours.net) or a broken absolute path.
  */
 async function resolveMaildir(config, userHint) {
-  // Parse hint into parts whether it's "user@domain" or "/some/path/user"
   const isEmail = userHint.includes('@') && !userHint.startsWith('/');
   let localPart, domain, sysUser;
 
@@ -153,80 +147,63 @@ async function resolveMaildir(config, userHint) {
     [localPart, domain] = userHint.split('@');
     sysUser = localPart;
   } else {
-    // Absolute path that didn't exist — derive hints from the path segments
     const segments = userHint.replace(/\/$/, '').split('/');
     localPart = segments[segments.length - 1];
-    // Try to guess domain from second-to-last segment if it looks like one
     const maybeD = segments[segments.length - 2] || '';
     domain = maybeD.includes('.') ? maybeD : '';
     sysUser = localPart;
   }
 
   const candidates = [
-    // ── Primary cPanel/Webuzo account — mail lives directly under ~/mail ──
+    // Primary cPanel/Webuzo account: mail lives directly under ~/mail
     `/home/${sysUser}/mail`,
     `/home/xotours/mail`,
-
-    // ── Webuzo / Dovecot vmail ────────────────────────────────────────────
-    domain && `/var/vmail/${domain}/${localPart}`,
-    domain && `/home/vmail/${domain}/${localPart}`,
+    // Webuzo / Dovecot vmail
+    domain ? `/var/vmail/${domain}/${localPart}` : null,
+    domain ? `/home/vmail/${domain}/${localPart}` : null,
     `/var/vmail/${localPart}`,
-
-    // ── cPanel sub-account style ──────────────────────────────────────────
-    domain && `/home/${sysUser}/mail/${domain}/${localPart}`,
+    // cPanel sub-account
+    domain ? `/home/${sysUser}/mail/${domain}/${localPart}` : null,
     `/home/${sysUser}/Maildir`,
-
-    // ── Plesk ─────────────────────────────────────────────────────────────
-    domain && `/var/qmail/mailnames/${domain}/${localPart}/Maildir`,
-
-    // ── Webuzo sub-account under hosting home ─────────────────────────────
-    domain && `/home/xotours/mail/${domain}/${localPart}`,
+    // Plesk
+    domain ? `/var/qmail/mailnames/${domain}/${localPart}/Maildir` : null,
+    // Webuzo sub-account
+    domain ? `/home/xotours/mail/${domain}/${localPart}` : null,
     `/home/xotours/mail/${localPart}`,
-
-    // ── Generic fallbacks ─────────────────────────────────────────────────
+    // Generic
     `/home/${localPart}/Maildir`,
     `/var/mail/${localPart}`,
-    domain && `/mail/${domain}/${localPart}`,
+    domain ? `/mail/${domain}/${localPart}` : null,
   ].filter(Boolean);
 
-  console.log(`  [SSH Sync] Auto-detecting maildir for "${userHint}"...`);
-  console.log(`  [SSH Sync] Will try ${candidates.length} candidate paths:`);
+  console.log(`  [SSH Sync] Auto-detecting maildir for "${userHint}" (${candidates.length} candidates)...`);
 
   for (const candidate of candidates) {
     try {
-      // A valid Maildir has at least a cur/ or new/ subdirectory
       const checkCmd = `if [ -d "${candidate}/cur" ] || [ -d "${candidate}/new" ]; then echo "EXISTS"; else echo "MISSING"; fi`;
       const result = await runSSHCommand(config, checkCmd);
       if (result.trim() === 'EXISTS') {
-        console.log(`  [SSH Sync] ✓ Found maildir: ${candidate}`);
+        console.log(`  [SSH Sync] Found maildir: ${candidate}`);
         return candidate;
       } else {
-        console.log(`  [SSH Sync]   ✗ ${candidate}`);
+        console.log(`  [SSH Sync]   x ${candidate}`);
       }
     } catch (e) {
-      console.log(`  [SSH Sync]   ✗ ${candidate} (${e.message.split('\n')[0].trim()})`);
+      console.log(`  [SSH Sync]   x ${candidate} (${e.message.split('\n')[0].trim()})`);
     }
   }
 
-  // ── Last resort: server-side find ─────────────────────────────────────
+  // Last resort: server-side find
   console.log(`  [SSH Sync] Running server-side find as last resort...`);
   try {
     const searchRoots = '/var/vmail /home/vmail /home /var/mail /mail';
     const findCmd = `find ${searchRoots} -maxdepth 6 -type d -name 'cur' 2>/dev/null | grep -i '${localPart}' | head -10`;
     const found = await runSSHCommand(config, findCmd);
     const lines = found.split('\n').map(l => l.trim()).filter(Boolean);
-
     if (lines.length > 0) {
-      // Prefer the match that also contains the domain name
-      const preferred = domain
-        ? lines.find(l => l.includes(domain)) || lines[0]
-        : lines[0];
+      const preferred = domain ? lines.find(l => l.includes(domain)) || lines[0] : lines[0];
       const resolved = preferred.replace(/\/cur$/, '');
-      console.log(`  [SSH Sync] ✓ Server find resolved: ${resolved}`);
-      if (lines.length > 1) {
-        console.log(`  [SSH Sync]   Other candidates found:`);
-        lines.filter(l => l !== preferred).forEach(l => console.log(`  [SSH Sync]     ${l}`));
-      }
+      console.log(`  [SSH Sync] Server find resolved: ${resolved}`);
       return resolved;
     }
   } catch (e) {
@@ -235,14 +212,23 @@ async function resolveMaildir(config, userHint) {
 
   throw new Error(
     `Could not find a valid Maildir for "${userHint}" on the remote server.\n` +
-    `Tried paths:\n  ${candidates.join('\n  ')}\n` +
-    `Fix: set SSH_MAILDIR to the correct absolute path (e.g. /var/vmail/xotours.net/junozhou).`
+    `Tried:\n  ${candidates.join('\n  ')}\n` +
+    `Fix: set SSH_MAILDIR to the correct absolute path (e.g. /home/xotours/mail or /var/vmail/xotours.net/junozhou).`
   );
 }
 
 /**
- * Group emails by calendar year.
- * Returns: Map<number, Email[]>  e.g.  { 2022: [...], 2023: [...], 2024: [...] }
+ * Estimate JSON byte size of an array of emails (fast approximation, 5% safety buffer).
+ */
+function estimateJsonBytes(emails) {
+  const sample = emails.slice(0, 20);
+  if (sample.length === 0) return 0;
+  const sampleBytes = Buffer.byteLength(JSON.stringify(sample), 'utf8');
+  return Math.ceil((sampleBytes / sample.length) * emails.length * 1.05);
+}
+
+/**
+ * Group emails by calendar year. Returns Map<number, Email[]>.
  */
 function groupEmailsByYear(emails) {
   const byYear = new Map();
@@ -255,7 +241,8 @@ function groupEmailsByYear(emails) {
 }
 
 /**
- * Build repo chunks so no single repo exceeds MAX_FILES_PER_REPO.
+ * Build repo chunks respecting both MAX_FILES_PER_REPO and MAX_JSON_BYTES.
+ * Never splits within a single year.
  */
 function buildRepoChunks(byYear) {
   const sortedYears = [...byYear.keys()].sort((a, b) => a - b);
@@ -264,18 +251,21 @@ function buildRepoChunks(byYear) {
 
   for (const year of sortedYears) {
     const yearEmails = byYear.get(year);
-
     if (!current) {
       current = { years: [year], emails: [...yearEmails] };
-    } else if (current.emails.length + yearEmails.length <= MAX_FILES_PER_REPO) {
-      current.years.push(year);
-      current.emails.push(...yearEmails);
     } else {
-      chunks.push(current);
-      current = { years: [year], emails: [...yearEmails] };
+      const combined = [...current.emails, ...yearEmails];
+      const overCount = combined.length > MAX_FILES_PER_REPO;
+      const overSize  = estimateJsonBytes(combined) > MAX_JSON_BYTES;
+      if (overCount || overSize) {
+        chunks.push(current);
+        current = { years: [year], emails: [...yearEmails] };
+      } else {
+        current.years.push(year);
+        current.emails.push(...yearEmails);
+      }
     }
   }
-
   if (current) chunks.push(current);
 
   return chunks.map((chunk, idx) => ({
@@ -288,7 +278,7 @@ function buildRepoChunks(byYear) {
 }
 
 /**
- * Write all repo output files plus a manifest.
+ * Write per-chunk JSON files + manifest.json.
  */
 async function writeRepoOutputs(chunks, outputDir) {
   await fs.mkdir(outputDir, { recursive: true });
@@ -302,12 +292,9 @@ async function writeRepoOutputs(chunks, outputDir) {
   for (const chunk of chunks) {
     const filename = chunk.name === 'main' ? 'emails.json' : `${chunk.name}.json`;
     const filepath = path.join(outputDir, filename);
-
     const sorted = [...chunk.emails].sort((a, b) => new Date(b.date) - new Date(a.date));
-
     await fs.writeFile(filepath, JSON.stringify(sorted, null, 2));
-    console.log(`  [Repo Split] Wrote ${sorted.length} emails → ${filename}`);
-
+    console.log(`  [Repo Split] Wrote ${sorted.length} emails -> ${filename}`);
     manifest.repos.push({
       name: chunk.name,
       file: filename,
@@ -318,11 +305,8 @@ async function writeRepoOutputs(chunks, outputDir) {
   }
 
   manifest.repos.sort((a, b) => b.yearEnd - a.yearEnd);
-
-  const manifestPath = path.join(outputDir, 'manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  await fs.writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   console.log(`  [Repo Split] Wrote manifest.json (${chunks.length} repo(s))`);
-
   return manifest;
 }
 
@@ -335,35 +319,32 @@ async function syncEmailsSSH(customConfig = {}) {
     config.ssh = { ...getDefaultConfig().ssh, ...customConfig.ssh };
   }
 
-  // ── Resolve maildir path ───────────────────────────────────────────────
+  // Resolve maildir path
   let maildir = config.ssh.maildir;
   if (!maildir) {
     throw new Error(
       'SSH_MAILDIR must be set. Use an email address (e.g. junozhou@xotours.net) ' +
-      'or an absolute path (e.g. /var/vmail/xotours.net/junozhou).'
+      'or an absolute path (e.g. /home/xotours/mail or /var/vmail/xotours.net/junozhou).'
     );
   }
 
   if (!maildir.startsWith('/')) {
-    // Looks like an email address — auto-detect the path
     maildir = await resolveMaildir(config, maildir);
   } else {
-    // Absolute path provided — verify it actually exists on the server
     try {
       const checkCmd = `if [ -d "${maildir}/cur" ] || [ -d "${maildir}/new" ]; then echo "EXISTS"; else echo "MISSING"; fi`;
       const result = await runSSHCommand(config, checkCmd);
       if (result.trim() !== 'EXISTS') {
-        console.log(`  [SSH Sync] ⚠️  SSH_MAILDIR "${maildir}" not found — attempting auto-detect...`);
+        console.log(`  [SSH Sync] SSH_MAILDIR "${maildir}" not found - attempting auto-detect...`);
         maildir = await resolveMaildir(config, maildir);
       } else {
-        console.log(`  [SSH Sync] ✓ SSH_MAILDIR verified: ${maildir}`);
+        console.log(`  [SSH Sync] SSH_MAILDIR verified: ${maildir}`);
       }
     } catch (e) {
-      console.log(`  [SSH Sync] ⚠️  Could not verify SSH_MAILDIR — attempting auto-detect...`);
+      console.log(`  [SSH Sync] Could not verify SSH_MAILDIR - attempting auto-detect...`);
       maildir = await resolveMaildir(config, maildir);
     }
   }
-  // ──────────────────────────────────────────────────────────────────────
 
   console.log(`\n  [SSH Sync] Connecting to ${config.ssh.user}@${config.ssh.host}:${config.ssh.port}`);
   console.log(`  [SSH Sync] Maildir Path: ${maildir}`);
@@ -388,7 +369,7 @@ async function syncEmailsSSH(customConfig = {}) {
       console.log(`  [SSH Sync] Loaded ${knownFiles.size} known files from ssh-index.json`);
     }
   } catch (e) {
-    console.log(`  [SSH Sync] No existing ssh-index.json found or invalid. Starting fresh.`);
+    console.log(`  [SSH Sync] No existing ssh-index.json found. Starting fresh.`);
   }
 
   const allEmails = [];
@@ -396,9 +377,9 @@ async function syncEmailsSSH(customConfig = {}) {
 
   for (const folder of foldersToSync) {
     console.log(`  [SSH Sync] Scanning ${folder.path} (last ${mtimeDays} days)...`);
-
     try {
-      const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays} ! -size +50M`;
+      // Skip files larger than 25 MB to avoid huge email/attachment payloads
+      const findCmd = `find ${folder.path} -type f -mtime -${mtimeDays} ! -size +25M`;
       const fileListRaw = await runSSHCommand(config, findCmd);
       const files = fileListRaw.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 0);
 
@@ -410,9 +391,7 @@ async function syncEmailsSSH(customConfig = {}) {
       const allUnseen = [];
       for (const filePath of files) {
         const baseName = path.basename(filePath).split(':')[0];
-        if (!knownFiles.has(baseName)) {
-          allUnseen.push({ filePath, baseName });
-        }
+        if (!knownFiles.has(baseName)) allUnseen.push({ filePath, baseName });
       }
 
       const fetchFiles = allUnseen.slice(0, config.maxEmails || 30000);
@@ -423,7 +402,6 @@ async function syncEmailsSSH(customConfig = {}) {
       for (let i = 0; i < fetchFiles.length; i += chunkSize) {
         const chunk = fetchFiles.slice(i, i + chunkSize);
         console.log(`  [SSH Sync] Fetching batch ${Math.floor(i / chunkSize) + 1} of ${Math.ceil(fetchFiles.length / chunkSize)}...`);
-
         try {
           const chunkFilesEscaped = chunk.map(f => `"${f.filePath.replace(/"/g, '\\"')}"`).join(' ');
           const catCmd = `for f in ${chunkFilesEscaped}; do echo "===EMAIL_DELIM_START==="; echo "$f"; echo "===FILENAME_END==="; base64 "$f" 2>/dev/null; echo "===EMAIL_DELIM_END==="; done`;
@@ -432,34 +410,25 @@ async function syncEmailsSSH(customConfig = {}) {
 
           for (const part of parts) {
             if (!part.trim()) continue;
-
             const filenameEndIdx = part.indexOf("===FILENAME_END===");
             const endIdx = part.indexOf("===EMAIL_DELIM_END===");
-
             if (filenameEndIdx === -1 || endIdx === -1) {
               console.error(`  [SSH Sync] Malformed chunk, missing delimiters.`);
               continue;
             }
-
             const filePath = part.substring(0, filenameEndIdx).trim();
             let rawEmailBase64 = part.substring(filenameEndIdx + "===FILENAME_END===".length, endIdx);
             rawEmailBase64 = rawEmailBase64.replace(/\s+/g, '');
-
             if (rawEmailBase64.length === 0) {
               console.error(`  [SSH Sync] Empty base64 payload for ${filePath}.`);
               continue;
             }
-
             try {
               const buffer = Buffer.from(rawEmailBase64, 'base64');
               const parsedData = await convertEmail(buffer, folder.name, config);
-
               const baseItem = chunk.find(c => c.filePath === filePath);
               if (baseItem) newKnownFiles.add(baseItem.baseName);
-
-              if (new Date(parsedData.date) >= cutoffDate) {
-                allEmails.push(parsedData);
-              }
+              if (new Date(parsedData.date) >= cutoffDate) allEmails.push(parsedData);
             } catch (err) {
               console.error(`  [SSH Sync] Failed to parse email ${filePath}: ${err.message}`);
             }
@@ -483,7 +452,7 @@ async function syncEmailsSSH(customConfig = {}) {
 
   console.log(`  [SSH Sync] Fetched ${allEmails.length} new emails from server.`);
 
-  // ── Load Existing Emails ───────────────────────────────────────────────
+  // Load existing emails from previous runs
   let existingEmails = [];
   const manifestPath = path.join(config.outputDir || 'public', 'manifest.json');
   try {
@@ -494,16 +463,14 @@ async function syncEmailsSSH(customConfig = {}) {
         const repoPath = path.join(config.outputDir || 'public', repo.file);
         if (await fs.stat(repoPath).catch(() => false)) {
           const repoDataStr = await fs.readFile(repoPath, 'utf8');
-          const repoData = JSON.parse(repoDataStr);
-          existingEmails.push(...repoData);
+          existingEmails.push(...JSON.parse(repoDataStr));
         }
       }
       console.log(`  [SSH Sync] Loaded ${existingEmails.length} existing emails from repos.`);
     } else {
       const emailsPath = path.join(config.outputDir || 'public', 'emails.json');
       if (await fs.stat(emailsPath).catch(() => false)) {
-        const emailsStr = await fs.readFile(emailsPath, 'utf8');
-        existingEmails = JSON.parse(emailsStr);
+        existingEmails = JSON.parse(await fs.readFile(emailsPath, 'utf8'));
         console.log(`  [SSH Sync] Loaded ${existingEmails.length} existing emails from emails.json.`);
       }
     }
@@ -511,27 +478,28 @@ async function syncEmailsSSH(customConfig = {}) {
     console.log(`  [SSH Sync] Failed to load existing emails: ${e.message}`);
   }
 
+  // Merge: existing + new (new wins on duplicate id)
   const allMergedEmailsMap = new Map();
-  for (const email of existingEmails) {
-    allMergedEmailsMap.set(email.id, email);
-  }
-  for (const email of allEmails) {
-    allMergedEmailsMap.set(email.id, email);
-  }
+  for (const email of existingEmails) allMergedEmailsMap.set(email.id, email);
+  for (const email of allEmails)      allMergedEmailsMap.set(email.id, email);
   const finalAllEmails = Array.from(allMergedEmailsMap.values());
 
-  // ── Repo-splitting logic ───────────────────────────────────────────────
-  const totalFiles = finalAllEmails.length;
+  // Repo-splitting: enforce both count AND size limits
+  const totalFiles     = finalAllEmails.length;
+  const estimatedBytes = estimateJsonBytes(finalAllEmails);
+  const estimatedMB    = (estimatedBytes / 1024 / 1024).toFixed(1);
+
   console.log(`\n  [Repo Split] Total emails to store: ${totalFiles}`);
-  console.log(`  [Repo Split] Limit per repo: ${MAX_FILES_PER_REPO}`);
+  console.log(`  [Repo Split] Estimated JSON size:   ${estimatedMB} MB`);
+  console.log(`  [Repo Split] Limits: ${MAX_FILES_PER_REPO} emails / ${MAX_JSON_BYTES / 1024 / 1024} MB per file`);
 
-  if (totalFiles <= MAX_FILES_PER_REPO) {
-    console.log(`  [Repo Split] Under limit — writing single emails.json`);
+  const needsSplit = totalFiles > MAX_FILES_PER_REPO || estimatedBytes > MAX_JSON_BYTES;
+
+  if (!needsSplit) {
+    console.log(`  [Repo Split] Under limits - writing single emails.json`);
     const sorted = [...finalAllEmails].sort((a, b) => new Date(b.date) - new Date(a.date));
-    const outPath = path.join(config.outputDir, 'emails.json');
     await fs.mkdir(config.outputDir, { recursive: true });
-    await fs.writeFile(outPath, JSON.stringify(sorted, null, 2));
-
+    await fs.writeFile(path.join(config.outputDir, 'emails.json'), JSON.stringify(sorted, null, 2));
     const manifest = {
       generatedAt: new Date().toISOString(),
       totalEmails: sorted.length,
@@ -546,17 +514,21 @@ async function syncEmailsSSH(customConfig = {}) {
     await fs.writeFile(path.join(config.outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`  [Repo Split] Done. Single repo, ${sorted.length} emails.`);
   } else {
-    console.log(`  [Repo Split] Over limit — splitting by year into archive repos...`);
+    if (totalFiles > MAX_FILES_PER_REPO)
+      console.log(`  [Repo Split] Over count limit (${totalFiles} > ${MAX_FILES_PER_REPO}) - splitting by year...`);
+    if (estimatedBytes > MAX_JSON_BYTES)
+      console.log(`  [Repo Split] Over size limit (${estimatedMB} MB > ${MAX_JSON_BYTES / 1024 / 1024} MB) - splitting by year...`);
+
     const byYear = groupEmailsByYear(finalAllEmails);
     console.log(`  [Repo Split] Years found: ${[...byYear.keys()].sort().join(', ')}`);
     const chunks = buildRepoChunks(byYear);
     console.log(`  [Repo Split] Will create ${chunks.length} repo(s):`);
     for (const c of chunks) {
-      console.log(`    → ${c.name}  years: ${c.yearStart}–${c.yearEnd}  emails: ${c.emails.length}`);
+      const cMB = (estimateJsonBytes(c.emails) / 1024 / 1024).toFixed(1);
+      console.log(`    -> ${c.name}  years: ${c.yearStart}-${c.yearEnd}  emails: ${c.emails.length}  ~${cMB} MB`);
     }
     await writeRepoOutputs(chunks, config.outputDir);
   }
-  // ──────────────────────────────────────────────────────────────────────
 
   return finalAllEmails;
 }
@@ -568,15 +540,15 @@ import url from 'url';
 if (import.meta.url === url.pathToFileURL(process.argv[1]).href) {
   import('dotenv').then(dotenv => {
     dotenv.config({ override: true });
-    console.log("🚀 Running Test SSH Sync directly...");
+    console.log("Running Test SSH Sync directly...");
     syncEmailsSSH()
       .then(emails => {
-        console.log(`\n✅ TEST SUCCESS: Extracted ${emails.length} emails!`);
+        console.log(`\nTEST SUCCESS: Extracted ${emails.length} emails!`);
         if (emails.length > 0) console.log("First email subject:", emails[0].subject);
         process.exit(0);
       })
       .catch(err => {
-        console.error("\n❌ TEST FAILED:");
+        console.error("\nTEST FAILED:");
         console.error(err);
         process.exit(1);
       });
