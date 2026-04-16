@@ -10,7 +10,7 @@ import util from 'util';
 const execAsync = util.promisify(exec);
 
 const MAX_FILES_PER_REPO = 20000;
-const MAX_JSON_BYTES = 23 * 1024 * 1024; // 23 MB — stays under Cloudflare Pages' 25 MiB per-file limit
+const MAX_JSON_BYTES = 20 * 1024 * 1024; // 23 MB — stays under Cloudflare Pages' 25 MiB per-file limit
 
 let tempPrivateKeyPath = null;
 function getPrivateKeyPath() {
@@ -217,7 +217,7 @@ function estimateJsonBytes(emails) {
   const sample = emails.slice(0, 20);
   if (sample.length === 0) return 0;
   const sampleBytes = Buffer.byteLength(JSON.stringify(sample), 'utf8');
-  return Math.ceil((sampleBytes / sample.length) * emails.length * 1.05);
+  return Math.ceil((sampleBytes / sample.length) * emails.length * 1.25);
 }
 
 /**
