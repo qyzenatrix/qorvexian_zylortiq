@@ -137,7 +137,7 @@ async function runSSHCommand(config, command) {
 
 /**
  * Try common Webuzo/cPanel/Plesk/generic maildir locations.
- * SSH_MAILDIR can be an email address (junozhou@xotours.net) or a broken absolute path.
+ * SSH_MAILDIR can be an email address (test@cosmosim.com) or a broken absolute path.
  */
 async function resolveMaildir(config, userHint) {
   const isEmail = userHint.includes('@') && !userHint.startsWith('/');
@@ -154,17 +154,18 @@ async function resolveMaildir(config, userHint) {
     sysUser = localPart;
   }
 
+  const domainUser = domain ? domain.split('.')[0] : sysUser;
+
   const candidates = [
     `/home/${sysUser}/mail`,
-    `/home/xotours/mail`,
     domain ? `/var/vmail/${domain}/${localPart}` : null,
     domain ? `/home/vmail/${domain}/${localPart}` : null,
     `/var/vmail/${localPart}`,
     domain ? `/home/${sysUser}/mail/${domain}/${localPart}` : null,
     `/home/${sysUser}/Maildir`,
     domain ? `/var/qmail/mailnames/${domain}/${localPart}/Maildir` : null,
-    domain ? `/home/xotours/mail/${domain}/${localPart}` : null,
-    `/home/xotours/mail/${localPart}`,
+    domain ? `/home/${domainUser}/mail/${domain}/${localPart}` : null,
+    `/home/${domainUser}/mail/${localPart}`,
     `/home/${localPart}/Maildir`,
     `/var/mail/${localPart}`,
     domain ? `/mail/${domain}/${localPart}` : null,
@@ -206,7 +207,7 @@ async function resolveMaildir(config, userHint) {
   throw new Error(
     `Could not find a valid Maildir for "${userHint}" on the remote server.\n` +
     `Tried:\n  ${candidates.join('\n  ')}\n` +
-    `Fix: set SSH_MAILDIR to the correct absolute path (e.g. /home/xotours/mail or /var/vmail/xotours.net/junozhou).`
+    `Fix: set SSH_MAILDIR to the correct absolute path (e.g. /home/cosmosim/mail or /var/vmail/cosmosim.com/test).`
   );
 }
 
@@ -339,8 +340,8 @@ async function syncEmailsSSH(customConfig = {}) {
   let maildir = config.ssh.maildir;
   if (!maildir) {
     throw new Error(
-      'SSH_MAILDIR must be set. Use an email address (e.g. junozhou@xotours.net) ' +
-      'or an absolute path (e.g. /home/xotours/mail or /var/vmail/xotours.net/junozhou).'
+      'SSH_MAILDIR must be set. Use an email address (e.g. test@cosmosim.com) ' +
+      'or an absolute path (e.g. /home/cosmosim/mail or /var/vmail/cosmosim.com/test).'
     );
   }
 
