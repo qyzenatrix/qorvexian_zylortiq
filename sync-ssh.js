@@ -450,7 +450,13 @@ async function syncEmailsSSH(customConfig = {}) {
               const parsedData = await convertEmail(buffer, folder.name, config);
               const baseItem = chunk.find(c => c.filePath === filePath);
               if (baseItem) newKnownFiles.add(baseItem.baseName);
-              if (new Date(parsedData.date) >= cutoffDate) allEmails.push(parsedData);
+              if (new Date(parsedData.date) >= cutoffDate) {
+                  if (config.onEmail) {
+                      await config.onEmail(parsedData);
+                  } else {
+                      allEmails.push(parsedData);
+                  }
+              }
             } catch (err) {
               console.error(`  [SSH Sync] Failed to parse email ${filePath}: ${err.message}`);
             }
@@ -473,97 +479,7 @@ async function syncEmailsSSH(customConfig = {}) {
 
   console.log(`  [SSH Sync] Fetched ${allEmails.length} new emails from server.`);
 
-  // Load existing emails from previous runs
-  let existingEmails = [];
-  const manifestPath = path.join(config.outputDir || 'public', 'manifest.json');
-  try {
-    if (await fs.stat(manifestPath).catch(() => false)) {
-      const manifestStr = await fs.readFile(manifestPath, 'utf8');
-      const manifest = JSON.parse(manifestStr);
-      for (const repo of manifest.repos || []) {
-        const repoPath = path.join(config.outputDir || 'public', repo.file);
-        if (await fs.stat(repoPath).catch(() => false)) {
-          const repoDataStr = await fs.readFile(repoPath, 'utf8');
-          existingEmails.push(...JSON.parse(repoDataStr));
-        }
-      }
-      console.log(`  [SSH Sync] Loaded ${existingEmails.length} existing emails from repos.`);
-    } else {
-      const emailsPath = path.join(config.outputDir || 'public', 'emails.json');
-      if (await fs.stat(emailsPath).catch(() => false)) {
-        existingEmails = JSON.parse(await fs.readFile(emailsPath, 'utf8'));
-        console.log(`  [SSH Sync] Loaded ${existingEmails.length} existing emails from emails.json.`);
-      }
-    }
-  } catch (e) {
-    console.log(`  [SSH Sync] Failed to load existing emails: ${e.message}`);
-  }
-
-  // Merge: existing + new (new wins on duplicate id)
-  const allMergedEmailsMap = new Map();
-  for (const email of existingEmails) allMergedEmailsMap.set(email.id, email);
-  for (const email of allEmails)      allMergedEmailsMap.set(email.id, email);
-  const finalAllEmails = Array.from(allMergedEmailsMap.values());
-
-  const totalFiles     = finalAllEmails.length;
-  const estimatedBytes = estimateJsonBytes(finalAllEmails);
-  const estimatedMB    = (estimatedBytes / 1024 / 1024).toFixed(1);
-
-  console.log(`\n  [Repo Split] Total emails to store: ${totalFiles}`);
-  console.log(`  [Repo Split] Estimated JSON size:   ${estimatedMB} MB`);
-  console.log(`  [Repo Split] Limits: ${MAX_FILES_PER_REPO} emails / ${MAX_JSON_BYTES / 1024 / 1024} MB per file`);
-
-  try {
-    const oldFiles = await fs.readdir(config.outputDir);
-    for (const file of oldFiles) {
-      if (file === 'emails.json' || (file.startsWith('emails-archive-') && file.endsWith('.json'))) {
-        await fs.unlink(path.join(config.outputDir, file));
-      }
-    }
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.warn(`  [SSH Sync] Could not clean old outputs: ${e.message}`);
-  }
-
-  const needsSplit = totalFiles > MAX_FILES_PER_REPO || estimatedBytes > MAX_JSON_BYTES;
-
-  if (!needsSplit) {
-    console.log(`  [Repo Split] Under limits - writing single emails.json`);
-    const sorted = [...finalAllEmails].sort((a, b) => new Date(b.date) - new Date(a.date));
-    await fs.mkdir(config.outputDir, { recursive: true });
-    await fs.writeFile(path.join(config.outputDir, 'emails.json'), JSON.stringify(sorted));
-    const manifest = {
-      generatedAt: new Date().toISOString(),
-      totalEmails: sorted.length,
-      repos: [{
-        name:       'main',
-        file:       'emails.json',
-        emailCount: sorted.length,
-        yearStart:  sorted.length ? new Date(sorted[sorted.length - 1].date).getFullYear() : null,
-        yearEnd:    sorted.length ? new Date(sorted[0].date).getFullYear() : null,
-        monthStart: sorted.length ? new Date(sorted[sorted.length - 1].date).getMonth() + 1 : null,
-        monthEnd:   sorted.length ? new Date(sorted[0].date).getMonth() + 1 : null,
-      }]
-    };
-    await fs.writeFile(path.join(config.outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log(`  [Repo Split] Done. Single repo, ${sorted.length} emails.`);
-  } else {
-    if (totalFiles > MAX_FILES_PER_REPO)
-      console.log(`  [Repo Split] Over count limit (${totalFiles} > ${MAX_FILES_PER_REPO}) - splitting by month...`);
-    if (estimatedBytes > MAX_JSON_BYTES)
-      console.log(`  [Repo Split] Over size limit (${estimatedMB} MB > ${MAX_JSON_BYTES / 1024 / 1024} MB) - splitting by month...`);
-
-    const byYearMonth = groupEmailsByYearMonth(finalAllEmails);
-    console.log(`  [Repo Split] Months found: ${[...byYearMonth.keys()].sort().join(', ')}`);
-    const chunks = buildRepoChunks(byYearMonth);
-    console.log(`  [Repo Split] Will create ${chunks.length} repo(s):`);
-    for (const c of chunks) {
-      const cMB = (estimateJsonBytes(c.emails) / 1024 / 1024).toFixed(1);
-      console.log(`    -> ${c.name}  ${c.yearStart}-${String(c.monthStart).padStart(2,'0')} to ${c.yearEnd}-${String(c.monthEnd).padStart(2,'0')}  emails: ${c.emails.length}  ~${cMB} MB`);
-    }
-    await writeRepoOutputs(chunks, config.outputDir);
-  }
-
-  return finalAllEmails;
+  return allEmails;
 }
 
 export { syncEmailsSSH };

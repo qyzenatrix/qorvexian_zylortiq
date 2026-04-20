@@ -242,57 +242,10 @@ async function syncAll() {
                     return domain ? `/home/${homeUser}/mail/${domain}/${localPart}` : '';
                 })();
 
-                const sshConfig = {
-                    ...account,
-                    ssh: {
-                        user: process.env.SSH_USER || 'root',
-                        host: process.env.SSH_HOST || 'mail.xotours.net',
-                        port: parseInt(process.env.SSH_PORT) || 22,
-                        maildir: sshMaildir,
-                        ...(account.ssh || {})
-                    },
-                    outputDir: 'public',
-                    maxEmails: parseInt(process.env.MAX_EMAILS) || 30000,
-                    syncDays: SYNC_DAYS
-                };
-
-                let fetchedEmails = null;
-
-                // 1️⃣ Try SSH first
-                if ((process.env.SSH_PRIVATE_KEY || process.env.SSH_KEY_PATH) && sshMaildir) {
-                    try {
-                        console.log(`  🔐 Trying SSH sync first (maildir: ${sshMaildir})...`);
-                        fetchedEmails = await syncEmailsSSH(sshConfig);
-                        console.log(`  ✓ Fetched ${fetchedEmails.length} emails via SSH.`);
-                    } catch (sshErr) {
-                        console.warn(`  ⚠️  SSH failed: ${sshErr.message}`);
-                        console.warn(`  ↩️  Falling back to IMAP...`);
-                        fetchedEmails = null;
-                    }
-                }
-
-                // 2️⃣ Fallback to IMAP if SSH was skipped or failed
-                if (fetchedEmails === null) {
-                    try {
-                        let imapConfig = { ...account.imap };
-                        imapConfig.password = await getPasswordByAccount(account.id, account.imap.user);
-                        if (kvCredentials.user && (kvCredentials.user === account.id || kvCredentials.user === account.imap.user)) {
-                            if (kvCredentials.host) imapConfig.host = kvCredentials.host;
-                            if (kvCredentials.port) imapConfig.port = parseInt(kvCredentials.port);
-                        }
-                        const imapCfg = { ...account, imap: imapConfig, outputDir: 'public', maxEmails: parseInt(process.env.MAX_EMAILS) || 30000, syncDays: SYNC_DAYS };
-                        fetchedEmails = await syncEmails(imapCfg);
-                        console.log(`  ✓ Fetched ${fetchedEmails.length} emails via IMAP (fallback).`);
-                    } catch (imapErr) {
-                        console.error(`  ❌ IMAP Sync Error for ${account.name}: ${imapErr.message}`);
-                        fetchedEmails = [];
-                    }
-                }
-
-                // 3️⃣ Process whichever emails we got
-                for (const email of fetchedEmails) {
-                    if (processedMessageIds.has(email.id) || (email.messageId && processedMessageIds.has(email.messageId))) continue;
-                    if (new Date(email.date) < cutoffDate) continue;
+                let fetchedCount = 0;
+                const processEmailCallback = async (email) => {
+                    if (processedMessageIds.has(email.id) || (email.messageId && processedMessageIds.has(email.messageId))) return;
+                    if (new Date(email.date) < cutoffDate) return;
                     processedMessageIds.add(email.id);
                     if (email.messageId) processedMessageIds.add(email.messageId);
                     const date = new Date(email.date);
@@ -330,7 +283,57 @@ async function syncAll() {
                         account: account.id,
                         path: `/emails/${year}/${month}/${email.id}.json`
                     });
+                    fetchedCount++;
+                };
+
+                const sshConfig = {
+                    ...account,
+                    onEmail: processEmailCallback,
+                    ssh: {
+                        user: process.env.SSH_USER || 'root',
+                        host: process.env.SSH_HOST || 'mail.xotours.net',
+                        port: parseInt(process.env.SSH_PORT) || 22,
+                        maildir: sshMaildir,
+                        ...(account.ssh || {})
+                    },
+                    outputDir: 'public',
+                    maxEmails: parseInt(process.env.MAX_EMAILS) || 30000,
+                    syncDays: SYNC_DAYS
+                };
+
+                let syncSuccess = false;
+
+                // 1️⃣ Try SSH first
+                if ((process.env.SSH_PRIVATE_KEY || process.env.SSH_KEY_PATH) && sshMaildir) {
+                    try {
+                        console.log(`  🔐 Trying SSH sync first (maildir: ${sshMaildir})...`);
+                        await syncEmailsSSH(sshConfig);
+                        console.log(`  ✓ Fetched ${fetchedCount} emails via SSH.`);
+                        syncSuccess = true;
+                    } catch (sshErr) {
+                        console.warn(`  ⚠️  SSH failed: ${sshErr.message}`);
+                        console.warn(`  ↩️  Falling back to IMAP...`);
+                    }
                 }
+
+                // 2️⃣ Fallback to IMAP if SSH was skipped or failed
+                if (!syncSuccess) {
+                    try {
+                        let imapConfig = { ...account.imap };
+                        imapConfig.password = await getPasswordByAccount(account.id, account.imap.user);
+                        if (kvCredentials.user && (kvCredentials.user === account.id || kvCredentials.user === account.imap.user)) {
+                            if (kvCredentials.host) imapConfig.host = kvCredentials.host;
+                            if (kvCredentials.port) imapConfig.port = parseInt(kvCredentials.port);
+                        }
+                        const imapCfg = { ...account, imap: imapConfig, onEmail: processEmailCallback, outputDir: 'public', maxEmails: parseInt(process.env.MAX_EMAILS) || 30000, syncDays: SYNC_DAYS };
+                        await syncEmails(imapCfg);
+                        console.log(`  ✓ Fetched ${fetchedCount} emails via IMAP (fallback).`);
+                    } catch (imapErr) {
+                        console.error(`  ❌ IMAP Sync Error for ${account.name}: ${imapErr.message}`);
+                    }
+                }
+
+                // Processed in callbacks
             }
         }
     }

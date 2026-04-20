@@ -190,7 +190,11 @@ function fetchFromFolder(imap, folderName, limit, config) {
           msg.once('end', async () => {
             try {
               const email = await convertEmail(buffer, folderName, config);
-              emails.push(email);
+              if (config.onEmail) {
+                 await config.onEmail(email);
+              } else {
+                 emails.push(email);
+              }
             } catch (e) { console.error(`  Parse error [${seqno}]:`, e.message); }
             pending--;
             checkDone();
