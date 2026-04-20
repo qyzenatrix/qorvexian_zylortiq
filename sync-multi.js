@@ -297,7 +297,7 @@ async function syncAll() {
                         ...(account.ssh || {})
                     },
                     outputDir: 'public',
-                    maxEmails: parseInt(process.env.MAX_EMAILS) || 30000,
+                    maxEmails: parseInt(process.env.MAX_EMAILS) || 500,
                     syncDays: SYNC_DAYS
                 };
 
@@ -325,7 +325,7 @@ async function syncAll() {
                             if (kvCredentials.host) imapConfig.host = kvCredentials.host;
                             if (kvCredentials.port) imapConfig.port = parseInt(kvCredentials.port);
                         }
-                        const imapCfg = { ...account, imap: imapConfig, onEmail: processEmailCallback, outputDir: 'public', maxEmails: parseInt(process.env.MAX_EMAILS) || 30000, syncDays: SYNC_DAYS };
+                        const imapCfg = { ...account, imap: imapConfig, onEmail: processEmailCallback, outputDir: 'public', maxEmails: parseInt(process.env.MAX_EMAILS) || 500, syncDays: SYNC_DAYS };
                         await syncEmails(imapCfg);
                         console.log(`  ✓ Fetched ${fetchedCount} emails via IMAP (fallback).`);
                     } catch (imapErr) {

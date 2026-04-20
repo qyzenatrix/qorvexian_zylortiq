@@ -40,7 +40,7 @@ function getDefaultConfig() {
     outputDir: process.env.OUTPUT_DIR || 'public',
     maxAttachmentSize: parseInt(process.env.MAX_ATTACHMENT_SIZE) || 500 * 1024,
     syncDays: parseInt(process.env.SYNC_DAYS) || 10950,
-    maxEmails: parseInt(process.env.MAX_EMAILS) || 30000
+    maxEmails: parseInt(process.env.MAX_EMAILS) || 500
   };
 }
 
@@ -416,7 +416,7 @@ async function syncEmailsSSH(customConfig = {}) {
         if (!knownFiles.has(baseName)) allUnseen.push({ filePath, baseName });
       }
 
-      const fetchFiles = allUnseen.slice(0, config.maxEmails || 30000);
+      const fetchFiles = allUnseen.slice(0, config.maxEmails || 500);
       console.log(`  [SSH Sync] Found ${files.length} total, ${allUnseen.length} unseen. Fetching ${fetchFiles.length}...`);
       if (fetchFiles.length === 0) continue;
 

@@ -32,7 +32,7 @@ const DEFAULT_CONFIG = {
   folders: (process.env.SYNC_FOLDERS || 'INBOX,Sent,Drafts')
     .split(',')
     .map(f => f.trim().replace(/^["']|["']$/g, '')),
-  maxEmails: parseInt(process.env.MAX_EMAILS) || 30000
+  maxEmails: parseInt(process.env.MAX_EMAILS) || 500
 };
 
 /**
