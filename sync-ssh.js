@@ -383,6 +383,23 @@ async function syncEmailsSSH(customConfig = {}) {
     { name: 'sent',  path: `${maildir}/.sent/new/` }
   ];
 
+  try {
+    const discoverCmd = `find "${maildir}" -maxdepth 2 -type d \\( -name "cur" -o -name "new" \\) | grep -i "\\." | grep -vEi "/\\.Trash|/\\.Junk|/\\.Spam|/\\.Drafts|/\\.Sent" || true`;
+    const discovered = await runSSHCommand(config, discoverCmd);
+    const discoveredPaths = discovered.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 5);
+    for (const p of discoveredPaths) {
+      const pWithSlash = p.endsWith('/') ? p : p + '/';
+      if (foldersToSync.some(f => f.path === pWithSlash)) continue;
+      const parentDir = p.replace(/\/cur\/?$/, '').replace(/\/new\/?$/, '');
+      const folderStr = path.basename(parentDir).replace(/^\./, ''); // Removes leading dot (.PEI -> PEI)
+      if (folderStr) {
+        foldersToSync.push({ name: folderStr.toLowerCase(), path: pWithSlash });
+      }
+    }
+  } catch (e) {
+    console.log(`  [SSH Sync] Custom folder discovery ignored: ${e.message.split('\n')[0].trim()}`);
+  }
+
   const SSH_INDEX_PATH = path.join(config.outputDir || 'public', 'ssh-index.json');
   let knownFiles = new Set();
   try {
