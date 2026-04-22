@@ -124,12 +124,81 @@ jobs:
           echo "Cloning ${PRIVATE_REPO}..."
           git clone --depth=1 \
             "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git" \
-            /tmp/private-emails
+            /tmp/private-emails || true
 
+          if [ ! -d "/tmp/private-emails/.git" ]; then
+            echo "Failed to clone. Initializing empty dir..."
+            mkdir -p /tmp/private-emails
+            cd /tmp/private-emails
+            git init
+            git remote add origin "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${PRIVATE_REPO}.git"
+          fi
+
+          cd /tmp/private-emails
+          FILE_COUNT=$(find . -type f | wc -l || echo "0")
+          echo "Current file count: $FILE_COUNT"
+          
+          if [ "$FILE_COUNT" -gt 19000 ]; then
+            echo "File count exceeds 19000 limit. Initiating automated repository rollover..."
+            DATE_SUFFIX=$(date +'%Y%m%d%H%M')
+            NEW_REPO_NAME="$(basename ${PRIVATE_REPO})_archive_${DATE_SUFFIX}"
+            ORG_USER=$(dirname ${PRIVATE_REPO})
+            NEW_PRIVATE_REPO="${ORG_USER}/${NEW_REPO_NAME}"
+            
+            echo "Creating new repository: ${NEW_PRIVATE_REPO}"
+            curl -s -X POST -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
+                 -H "Accept: application/vnd.github.v3+json" \
+                 -d "{\"name\": \"${NEW_REPO_NAME}\", \"private\": true}" \
+                 "https://api.github.com/user/repos"
+            
+            echo "Initializing new repository..."
+            mkdir -p /tmp/new-private-emails
+            cd /tmp/new-private-emails
+            git init
+            git config user.name "Email Sync Bot"
+            git config user.email "bot@sync"
+            
+            mkdir -p public/config
+            cp -r /tmp/private-emails/public/config/* public/config/ 2>/dev/null || true
+            
+            git add .
+            git commit -m "Initialize rollover repository" || true
+            git branch -M master
+            git remote add origin "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${NEW_PRIVATE_REPO}.git"
+            git push -u origin master
+            
+            echo "Updating main repository secret to point to ${NEW_PRIVATE_REPO}..."
+            MAIN_REPO="${GITHUB_REPOSITORY}"
+            [ -z "$MAIN_REPO" ] && MAIN_REPO="qyzenatrix/qorvexian_zylortiq"
+            
+            PUB_KEY_RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${MAIN_REPO}/actions/secrets/public-key")
+            
+            KEY_ID=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key_id')
+            PUBLIC_KEY=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key')
+            
+            ENCRYPTED=$(python3 -c "import sys, base64; from nacl.public import PublicKey, SealedBox; pub_key=PublicKey(base64.b64decode(sys.argv[1])); print(base64.b64encode(SealedBox(pub_key).encrypt(sys.argv[2].encode())).decode())" "$PUBLIC_KEY" "$NEW_PRIVATE_REPO")
+            
+            curl -s -X PUT \
+              -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${MAIN_REPO}/actions/secrets/PRIVATE_REPO" \
+              -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}"
+            
+            PRIVATE_REPO="${NEW_PRIVATE_REPO}"
+            rm -rf /tmp/private-emails
+            mv /tmp/new-private-emails /tmp/private-emails
+          fi
+
+          echo "Proceeding with sync in ${PRIVATE_REPO}..."
+          
           # Copy the scripts into the private repo folder so relative paths work
+          cd $GITHUB_WORKSPACE
           cp sync-multi.js sync-ssh.js sync-imap.js /tmp/private-emails/
           cd /tmp/private-emails
-
+          
           # Install dependencies here too
           npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
 
