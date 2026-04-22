@@ -62,38 +62,9 @@ jobs:
 
           echo "Updating PRIVATE_REPO secret to: $TARGET_PRIVATE_REPO"
 
-          # Get the public key for secret encryption
-          PUB_KEY_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/qyzenatrix/qorvexian_zylortiq/actions/secrets/public-key")
-
-          KEY_ID=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key_id')
-          PUBLIC_KEY=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key')
-
-          # Encrypt the secret value using Python (available on ubuntu-latest)
-          ENCRYPTED=$(python3 -c "
-            import base64, sys
-            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
-            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-            from cryptography.hazmat.backends import default_backend
-            from nacl.public import PublicKey, SealedBox
-            import nacl.encoding
-
-            pub_key_bytes = base64.b64decode('$PUBLIC_KEY')
-            pub_key = PublicKey(pub_key_bytes)
-            box = SealedBox(pub_key)
-            secret_value = '$TARGET_PRIVATE_REPO'.encode()
-            encrypted = box.encrypt(secret_value)
-            print(base64.b64encode(encrypted).decode())
-          ")
-
-          # Update the secret
-          curl -s -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/qyzenatrix/qorvexian_zylortiq/actions/secrets/PRIVATE_REPO" \
-            -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}"
+          # Use GitHub CLI to securely update the secret (avoids Python nacl dependency)
+          MAIN_REPO="${GITHUB_REPOSITORY:-qyzenatrix/qorvexian_zylortiq}"
+          echo "$TARGET_PRIVATE_REPO" | gh secret set PRIVATE_REPO --repo "$MAIN_REPO"
 
           echo "✅ PRIVATE_REPO secret updated to: $TARGET_PRIVATE_REPO"
       
@@ -171,21 +142,8 @@ jobs:
             MAIN_REPO="${GITHUB_REPOSITORY}"
             [ -z "$MAIN_REPO" ] && MAIN_REPO="qyzenatrix/qorvexian_zylortiq"
             
-            PUB_KEY_RESPONSE=$(curl -s \
-              -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${MAIN_REPO}/actions/secrets/public-key")
-            
-            KEY_ID=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key_id')
-            PUBLIC_KEY=$(echo "$PUB_KEY_RESPONSE" | jq -r '.key')
-            
-            ENCRYPTED=$(python3 -c "import sys, base64; from nacl.public import PublicKey, SealedBox; pub_key=PublicKey(base64.b64decode(sys.argv[1])); print(base64.b64encode(SealedBox(pub_key).encrypt(sys.argv[2].encode())).decode())" "$PUBLIC_KEY" "$NEW_PRIVATE_REPO")
-            
-            curl -s -X PUT \
-              -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${MAIN_REPO}/actions/secrets/PRIVATE_REPO" \
-              -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}"
+            export GH_TOKEN="${PRIVATE_REPO_PAT}"
+            gh secret set PRIVATE_REPO --body "${NEW_PRIVATE_REPO}" --repo "${MAIN_REPO}"
             
             PRIVATE_REPO="${NEW_PRIVATE_REPO}"
             rm -rf /tmp/private-emails
