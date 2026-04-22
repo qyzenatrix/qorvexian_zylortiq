@@ -4,6 +4,7 @@ import path from 'path';
 import { simpleParser } from 'mailparser';
 import { syncEmails } from './sync-imap.js';
 import { syncEmailsSSH } from './sync-ssh.js';
+import { execSync } from 'child_process';
 
 dotenv.config({ override: true });
 
@@ -221,6 +222,29 @@ async function syncAll() {
     }
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - (SYNC_DAYS + 1));
+    
+    // Auto-Rollover Trigger
+    if (searchIndex.emails && searchIndex.emails.length > 19000) {
+        console.log(`\n======================================================`);
+        console.log(`File count exceeds 19000 limit. Initiating automated repository rollover...`);
+        console.log(`======================================================`);
+        try {
+            execSync('node rollover.js', { stdio: 'inherit' });
+            console.log(`Rollover complete. Sync will restart next cycle on fresh repository.`);
+            process.exit(0);
+        } catch(e) {
+             console.error('Rollover failed:', e.message);
+             process.exit(1);
+        }
+    }
+
+    if (process.env.MIN_SYNC_DATE) {
+        const minDate = new Date(process.env.MIN_SYNC_DATE);
+        if (cutoffDate < minDate) {
+            cutoffDate.setTime(minDate.getTime());
+            console.log(`  🕒 Restricted sync cutoff to MIN_SYNC_DATE: ${process.env.MIN_SYNC_DATE}`);
+        }
+    }
     const DISABLE_SYNC = process.env.DISABLE_SYNC === 'true';
     if (DISABLE_SYNC) {
         console.log('  âš ï¸  Sync is DISABLED via DISABLE_SYNC variable. Skipping fetch.');
