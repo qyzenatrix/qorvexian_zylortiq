@@ -80,6 +80,7 @@ jobs:
           CLEAN_GROUP=$(echo "$PRIVATE_REPO_GROUP" | tr -d '\r' | tr '\n' ',')
           IFS=',' read -ra PAIRS <<< "$CLEAN_GROUP"
           for PAIR in "${PAIRS[@]}"; do
+            cd $GITHUB_WORKSPACE
             # Trim whitespace
             PAIR=$(echo "$PAIR" | xargs)
             if [ -z "$PAIR" ]; then continue; fi
@@ -164,6 +165,7 @@ jobs:
             cd $GITHUB_WORKSPACE
             cp sync-multi.js sync-ssh.js sync-imap.js rebuild-index.js /tmp/private-emails/
             cd /tmp/private-emails
+            mkdir -p public
             
             # Install dependencies here too
             npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
@@ -210,9 +212,9 @@ jobs:
                   echo "Push failed, fetching and rebasing..."
                   git fetch origin "${DEFAULT_BRANCH}" || { echo "Fetch failed (remote might not exist). Retrying push..."; sleep 2; continue; }
                   if ! git rebase origin/"${DEFAULT_BRANCH}"; then
-                    git checkout --ours public/search-index.json 2>/dev/null || true
-                    git add public/search-index.json 2>/dev/null || true
-                    git rebase --continue || git rebase --skip
+                    git checkout --theirs . 2>/dev/null || true
+                    git add . 2>/dev/null || true
+                    git rebase --continue 2>/dev/null || git rebase --skip
                   fi
                   sleep 2
                 fi
