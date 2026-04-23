@@ -195,13 +195,35 @@ async function syncAll() {
         port: kvCredentials.port || 'none'
     });
     
-    // Now load search index...
-    if (fs.existsSync(SEARCH_INDEX_PATH)) {
-        fs.copyFileSync(SEARCH_INDEX_PATH, SEARCH_INDEX_PATH + '.bak');
+    // Now load search index to populate processedMessageIds...
+    let totalLoadedEmails = 0;
+    try {
+        const manifestPath = 'public/manifest.json';
+        if (fs.existsSync(manifestPath)) {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            if (manifest.repos && Array.isArray(manifest.repos)) {
+                for (const repo of manifest.repos) {
+                    const repoPath = path.join('public', repo.file);
+                    if (fs.existsSync(repoPath)) {
+                        const existing = JSON.parse(fs.readFileSync(repoPath, 'utf8'));
+                        if (Array.isArray(existing)) {
+                            existing.forEach(e => {
+                                if (e.id) processedMessageIds.add(e.id);
+                                if (e.messageId) processedMessageIds.add(e.messageId);
+                                totalLoadedEmails++;
+                            });
+                        }
+                    }
+                }
+            }
+            console.log(`  ðŸ“‚ Loaded ${totalLoadedEmails} emails from manifest repos.`);
+        }
+    } catch(e) {
+        console.warn('  âš ï¸  Could not load existing manifest.json, processing from search-index.json fallback.');
     }
     
     let searchIndex = { emails: [], version: new Date().toISOString() };
-    if (fs.existsSync(SEARCH_INDEX_PATH)) {
+    if (totalLoadedEmails === 0 && fs.existsSync(SEARCH_INDEX_PATH)) {
         try {
             const existing = JSON.parse(fs.readFileSync(SEARCH_INDEX_PATH, 'utf8'));
             if (existing && Array.isArray(existing.emails)) {
@@ -210,21 +232,22 @@ async function syncAll() {
                     if (!uniqueEmails.has(e.id)) uniqueEmails.set(e.id, e);
                 });
                 searchIndex.emails = Array.from(uniqueEmails.values());
-                console.log(`  ðŸ“‚ Loaded ${searchIndex.emails.length} unique emails from index.`);
+                console.log(`  ðŸ“‚ Loaded ${searchIndex.emails.length} unique emails from legacy index.`);
                 searchIndex.emails.forEach(e => {
                     if (e.id) processedMessageIds.add(e.id);
                     if (e.messageId) processedMessageIds.add(e.messageId);
+                    totalLoadedEmails++;
                 });
             }
         } catch (e) {
-            console.warn('  âš ï¸  Could not load existing search-index.json, starting fresh.');
+            console.warn('  âš ï¸   Could not load existing search-index.json, starting fresh.');
         }
     }
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - (SYNC_DAYS + 1));
     
     // Auto-Rollover Trigger
-    if (searchIndex.emails && searchIndex.emails.length > 19000) {
+    if (totalLoadedEmails > 19000) {
         console.log(`\n======================================================`);
         console.log(`File count exceeds 19000 limit. Initiating automated repository rollover...`);
         console.log(`======================================================`);
@@ -361,16 +384,18 @@ async function syncAll() {
             }
         }
     }
-    console.log(`\nðŸ“Š Total emails in unified inbox: ${searchIndex.emails.length}`);
-    searchIndex.emails.sort((a, b) => new Date(b.date) - new Date(a.date));
-    searchIndex.totalEmails = searchIndex.emails.length;
-    searchIndex.version = new Date().toISOString();
-    fs.writeFileSync(SEARCH_INDEX_PATH, JSON.stringify(searchIndex, null, 2));
+    console.log(`\nðŸ“Š Processed ${searchIndex.emails.length} new emails in this sync.`);
     if (emailsToPush.length > 0) {
         console.log(`\nðŸ“… Pushing ${emailsToPush.length} whitelisted emails to calendar...`);
         for (const email of emailsToPush) await pushToCalendar(email);
     }
     cleanupOversizedFiles();
+    try {
+        console.log('\n🔄 Rebuilding unified search index...');
+        execSync('node rebuild-index.js', { stdio: 'inherit' });
+    } catch(e) {
+        console.error('â Œ Error rebuilding index:', e.message);
+    }
     console.log('\nâœ… Unified sync complete!');
 }
 
