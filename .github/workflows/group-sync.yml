@@ -156,7 +156,7 @@ jobs:
             
             # Copy the scripts into the private repo folder so relative paths work
             cd $GITHUB_WORKSPACE
-            cp sync-multi.js sync-ssh.js sync-imap.js /tmp/private-emails/
+            cp sync-multi.js sync-ssh.js sync-imap.js rebuild-index.js /tmp/private-emails/
             cd /tmp/private-emails
             
             # Install dependencies here too
@@ -164,6 +164,9 @@ jobs:
 
             export OUTPUT_DIR=public
             export SYNC_ACCOUNT="$ACCOUNT"
+
+            echo "Rebuilding indices before sync to establish cached items..."
+            node rebuild-index.js || true
 
             node sync-multi.js
             
