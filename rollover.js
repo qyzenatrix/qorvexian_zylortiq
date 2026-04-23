@@ -38,7 +38,7 @@ function updateEnvValue(envPath, key, value) {
 async function main() {
     const cfAccountId = process.env.CF_ID;
     const cfApiToken = process.env.CF_API_TOKEN || process.env.GLOUDFLARE_API;
-    const gitToken = process.env.GIT_TOKEN;
+    const gitToken = process.env.GIT_TOKEN || process.env.GH_TOKEN || process.env.PRIVATE_REPO_PAT;
     const originalProjectName = process.env.PROJECT_NAME || 'email-cosmosim-project';
     const emailUser = process.env.EMAIL_USER;
     const gitOwner = process.env.GIT_OWNER || process.env.GITHUB_OWNER || 'qyzenatrix';
@@ -154,6 +154,19 @@ async function main() {
     if (fs.existsSync(path.dirname(searchIndexPath))) {
         fs.writeFileSync(searchIndexPath, JSON.stringify(cleanIndex, null, 2));
     }
+    
+    // Clear manifest.json and any chunked emails JSON files so sync-multi ignores them
+    const publicDir = path.join(__dirname, 'public');
+    if (fs.existsSync(publicDir)) {
+        const items = fs.readdirSync(publicDir);
+        for (const item of items) {
+            if (item === 'manifest.json' || (item.startsWith('emails') && item.endsWith('.json'))) {
+                try {
+                    fs.rmSync(path.join(publicDir, item), { force: true });
+                } catch(e) {}
+            }
+        }
+    }
 
     // Determine current ISODate for min sync cutoff
     const rolloverDate = new Date().toISOString();
@@ -164,6 +177,17 @@ async function main() {
     // Update active .env file
     const activeEnvPath = path.join(__dirname, '.env');
     updateEnvValue(activeEnvPath, 'MIN_SYNC_DATE', rolloverDate);
+    
+    // Persist MIN_SYNC_DATE in public/config/sync-state.json so it commits to the repo 
+    // because .env is often ignored by git during GitHub Actions
+    const syncStatePath = path.join(__dirname, 'public', 'config', 'sync-state.json');
+    let syncState = {};
+    if (fs.existsSync(syncStatePath)) {
+        try { syncState = JSON.parse(fs.readFileSync(syncStatePath, 'utf8')); } catch(e) {}
+    }
+    syncState.MIN_SYNC_DATE = rolloverDate;
+    fs.mkdirSync(path.dirname(syncStatePath), { recursive: true });
+    fs.writeFileSync(syncStatePath, JSON.stringify(syncState, null, 2));
     
     // Append to JSON safe ARCHIVES env var
     let archivesJSON = [];

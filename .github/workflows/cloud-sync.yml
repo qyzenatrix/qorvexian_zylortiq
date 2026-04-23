@@ -109,52 +109,11 @@ jobs:
           FILE_COUNT=$(find . -type f | wc -l || echo "0")
           echo "Current file count: $FILE_COUNT"
           
-          if [ "$FILE_COUNT" -gt 19000 ]; then
-            echo "File count exceeds 19000 limit. Initiating automated repository rollover..."
-            DATE_SUFFIX=$(date +'%Y%m%d%H%M')
-            NEW_REPO_NAME="$(basename ${PRIVATE_REPO})_archive_${DATE_SUFFIX}"
-            ORG_USER=$(dirname ${PRIVATE_REPO})
-            NEW_PRIVATE_REPO="${ORG_USER}/${NEW_REPO_NAME}"
-            
-            echo "Creating new repository: ${NEW_PRIVATE_REPO}"
-            curl -s -X POST -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
-                 -H "Accept: application/vnd.github.v3+json" \
-                 -d "{\"name\": \"${NEW_REPO_NAME}\", \"private\": true}" \
-                 "https://api.github.com/user/repos"
-            
-            echo "Initializing new repository..."
-            mkdir -p /tmp/new-private-emails
-            cd /tmp/new-private-emails
-            git init
-            git config user.name "Email Sync Bot"
-            git config user.email "bot@sync"
-            
-            mkdir -p public/config
-            cp -r /tmp/private-emails/public/config/* public/config/ 2>/dev/null || true
-            
-            git add .
-            git commit -m "Initialize rollover repository" || true
-            git branch -M master
-            git remote add origin "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${NEW_PRIVATE_REPO}.git"
-            git push -u origin master
-            
-            echo "Updating main repository secret to point to ${NEW_PRIVATE_REPO}..."
-            MAIN_REPO="${GITHUB_REPOSITORY}"
-            [ -z "$MAIN_REPO" ] && MAIN_REPO="qyzenatrix/qorvexian_zylortiq"
-            
-            export GH_TOKEN="${PRIVATE_REPO_PAT}"
-            gh secret set PRIVATE_REPO --body "${NEW_PRIVATE_REPO}" --repo "${MAIN_REPO}"
-            
-            PRIVATE_REPO="${NEW_PRIVATE_REPO}"
-            rm -rf /tmp/private-emails
-            mv /tmp/new-private-emails /tmp/private-emails
-          fi
-
           echo "Proceeding with sync in ${PRIVATE_REPO}..."
           
           # Copy the scripts into the private repo folder so relative paths work
           cd $GITHUB_WORKSPACE
-          cp sync-multi.js sync-ssh.js sync-imap.js /tmp/private-emails/
+          cp sync-multi.js sync-ssh.js sync-imap.js rebuild-index.js rollover.js create-cloudflare-pages.js update-cloudflare-env.js add-kv-binding.js /tmp/private-emails/ 2>/dev/null || true
           cd /tmp/private-emails
           
           # Install dependencies here too

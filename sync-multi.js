@@ -261,6 +261,15 @@ async function syncAll() {
         }
     }
 
+    if (fs.existsSync('public/config/sync-state.json')) {
+        try {
+            const syncState = JSON.parse(fs.readFileSync('public/config/sync-state.json', 'utf8'));
+            if (syncState.MIN_SYNC_DATE) {
+                process.env.MIN_SYNC_DATE = syncState.MIN_SYNC_DATE;
+            }
+        } catch(e) {}
+    }
+
     if (process.env.MIN_SYNC_DATE) {
         const minDate = new Date(process.env.MIN_SYNC_DATE);
         if (cutoffDate < minDate) {
