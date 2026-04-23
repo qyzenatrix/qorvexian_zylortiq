@@ -88,6 +88,12 @@ jobs:
             REPO=$(echo "$PAIR" | cut -d':' -f1 | xargs)
             ACCOUNT=$(echo "$PAIR" | cut -d':' -f2 | xargs)
             
+            # Ensure REPO has an organization prefix
+            if [[ "$REPO" != *"/"* ]]; then
+              REPO="qyzenatrix/$REPO"
+              echo "Auto-corrected missing organization in REPO: $REPO"
+            fi
+            
             echo "=========================================================="
             echo "ðŸ”„ Processing sync for Account: $ACCOUNT -> Repo: $REPO"
             echo "=========================================================="
@@ -190,6 +196,10 @@ jobs:
             else
               git commit -m "Sync emails $ACCOUNT $(date +'%Y-%m-%d %H:%M UTC')"
               DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
+              if [ -z "$DEFAULT_BRANCH" ]; then
+                DEFAULT_BRANCH="master"
+                git branch -M "$DEFAULT_BRANCH" || true
+              fi
               
               # Retry pushing if failures
               for i in 1 2 3 4 5; do
@@ -198,7 +208,7 @@ jobs:
                   break
                 else
                   echo "Push failed, fetching and rebasing..."
-                  git fetch origin "${DEFAULT_BRANCH}"
+                  git fetch origin "${DEFAULT_BRANCH}" || { echo "Fetch failed (remote might not exist). Retrying push..."; sleep 2; continue; }
                   if ! git rebase origin/"${DEFAULT_BRANCH}"; then
                     git checkout --ours public/search-index.json 2>/dev/null || true
                     git add public/search-index.json 2>/dev/null || true
