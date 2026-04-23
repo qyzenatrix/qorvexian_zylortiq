@@ -170,6 +170,14 @@ jobs:
 
             node sync-multi.js
             
+            # Strip bad rules from .gitignore to ensure emails publish to Cloudflare
+            if [ -f .gitignore ]; then
+              sed -i '/public\/emails\/\*\.json/d' .gitignore
+              sed -i '/public\/manifest\.json/d' .gitignore
+              sed -i '/public\/search-index\.json/d' .gitignore
+              sed -i '/public\/emails\.json/d' .gitignore
+            fi
+
             # Ensure we ignore node_modules and scripts from being synced into the repo
             echo "node_modules/" >> .gitignore
             echo "package-lock.json" >> .gitignore
