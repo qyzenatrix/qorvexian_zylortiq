@@ -1,0 +1,201 @@
+name: Group Private Repos Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at midnight UTC
+  workflow_dispatch:
+    inputs:
+      force_full_sync:
+        description: 'Force full sync (ignore cache)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: group-email-sync
+  cancel-in-progress: false
+
+jobs:
+  group-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DISABLE_SYNC: ${{ secrets.DISABLE_SYNC || 'false' }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      
+      - name: Install dependencies 
+        run: |
+          npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
+
+      - name: Sync emails iteratively to private repos
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          PRIVATE_REPO_GROUP: ${{ secrets.PRIVATE_REPO_GROUP }}
+          SYNC_FOLDERS: ${{ secrets.SYNC_FOLDERS || 'INBOX,Sent' }}
+          SYNC_DAYS: ${{ secrets.SYNC_DAYS || '3' }}
+          MAX_ATTACHMENT_SIZE: ${{ secrets.MAX_ATTACHMENT_SIZE || '524288' }}
+          HOTMAIL_IMAP_PASS: ${{ secrets.HOTMAIL_IMAP_PASS }}
+          SUPERESOLUTIONS_IMAP_PASS: ${{ secrets.SUPERESOLUTIONS_IMAP_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WHITELIST_DOMAINS: ${{ secrets.WHITELIST_DOMAINS }}
+          WHITELIST_SENDERS: ${{ secrets.WHITELIST_SENDERS }}
+          WHITELIST_KEYWORDS: ${{ secrets.WHITELIST_KEYWORDS }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_MAILDIR: ${{ secrets.SSH_MAILDIR }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN || secrets.GLOUDFLARE_API }}
+          CF_ID: ${{ secrets.CF_ID }}
+          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+        run: |
+          if [ -z "$PRIVATE_REPO_PAT" ]; then
+            echo "::error::PRIVATE_REPO_PAT is empty"
+            exit 1
+          fi
+          
+          if [ -z "$PRIVATE_REPO_GROUP" ]; then
+            echo "::error::PRIVATE_REPO_GROUP is empty. Must be format 'user/repo:email@domain.com, user/repo2:email2@domain.com'"
+            exit 1
+          fi
+          
+          # Initialize variables
+          UPDATED_GROUP="$PRIVATE_REPO_GROUP"
+          MAIN_REPO="${GITHUB_REPOSITORY:-qyzenatrix/qorvexian_zylortiq}"
+          export GH_TOKEN="${PRIVATE_REPO_PAT}"
+          
+          # Read comma separated list
+          IFS=',' read -ra PAIRS <<< "$PRIVATE_REPO_GROUP"
+          for PAIR in "${PAIRS[@]}"; do
+            # Trim whitespace
+            PAIR=$(echo "$PAIR" | xargs)
+            if [ -z "$PAIR" ]; then continue; fi
+            
+            # Extract Repo and Account
+            REPO=$(echo "$PAIR" | cut -d':' -f1 | xargs)
+            ACCOUNT=$(echo "$PAIR" | cut -d':' -f2 | xargs)
+            
+            echo "=========================================================="
+            echo "ðŸ”„ Processing sync for Account: $ACCOUNT -> Repo: $REPO"
+            echo "=========================================================="
+            
+            echo "Cloning ${REPO}..."
+            rm -rf /tmp/private-emails
+            git clone --depth=1 \
+              "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${REPO}.git" \
+              /tmp/private-emails || true
+
+            if [ ! -d "/tmp/private-emails/.git" ]; then
+              echo "Failed to clone. Initializing empty dir..."
+              mkdir -p /tmp/private-emails
+              cd /tmp/private-emails
+              git init
+              git remote add origin "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${REPO}.git"
+            fi
+
+            cd /tmp/private-emails
+            FILE_COUNT=$(find . -type f | wc -l || echo "0")
+            echo "Current file count for $REPO: $FILE_COUNT"
+            
+            CURRENT_TARGET_REPO="$REPO"
+            
+            # --- Rollover Logic ---
+            if [ "$FILE_COUNT" -gt 19000 ]; then
+              echo "File count exceeds 19000 limit. Initiating automated repository rollover for $REPO..."
+              DATE_SUFFIX=$(date +'%Y%m%d%H%M')
+              NEW_REPO_NAME="$(basename ${REPO})_archive_${DATE_SUFFIX}"
+              ORG_USER=$(dirname ${REPO})
+              NEW_PRIVATE_REPO="${ORG_USER}/${NEW_REPO_NAME}"
+              
+              echo "Creating new repository: ${NEW_PRIVATE_REPO}"
+              curl -s -X POST -H "Authorization: Bearer ${PRIVATE_REPO_PAT}" \
+                   -H "Accept: application/vnd.github.v3+json" \
+                   -d "{\"name\": \"${NEW_REPO_NAME}\", \"private\": true}" \
+                   "https://api.github.com/user/repos"
+              
+              echo "Initializing new repository..."
+              mkdir -p /tmp/new-private-emails
+              cd /tmp/new-private-emails
+              git init
+              git config user.name "Email Sync Bot"
+              git config user.email "bot@sync"
+              
+              mkdir -p public/config
+              cp -r /tmp/private-emails/public/config/* public/config/ 2>/dev/null || true
+              
+              git add .
+              git commit -m "Initialize rollover repository" || true
+              git branch -M master
+              git remote add origin "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${NEW_PRIVATE_REPO}.git"
+              git push -u origin master
+              
+              echo "Updating PRIVATE_REPO_GROUP secret to point to ${NEW_PRIVATE_REPO}..."
+              # String replace old repo with new repo in the updated group
+              UPDATED_GROUP="${UPDATED_GROUP/${REPO}/${NEW_PRIVATE_REPO}}"
+              gh secret set PRIVATE_REPO_GROUP --body "${UPDATED_GROUP}" --repo "${MAIN_REPO}"
+              
+              CURRENT_TARGET_REPO="${NEW_PRIVATE_REPO}"
+              rm -rf /tmp/private-emails
+              mv /tmp/new-private-emails /tmp/private-emails
+            fi
+
+            echo "Proceeding with sync in ${CURRENT_TARGET_REPO}..."
+            
+            # Copy the scripts into the private repo folder so relative paths work
+            cd $GITHUB_WORKSPACE
+            cp sync-multi.js sync-ssh.js sync-imap.js /tmp/private-emails/
+            cd /tmp/private-emails
+            
+            # Install dependencies here too
+            npm install --no-save dotenv node-imap mailparser @anthropic-ai/sdk
+
+            export OUTPUT_DIR=public
+            export SYNC_ACCOUNT="$ACCOUNT"
+
+            node sync-multi.js
+
+            git config user.name "Email Sync Bot"
+            git config user.email "bot@sync"
+            git add .
+            if git diff --staged --quiet; then
+              echo "Nothing new to commit for $CURRENT_TARGET_REPO"
+            else
+              git commit -m "Sync emails $ACCOUNT $(date +'%Y-%m-%d %H:%M UTC')"
+              DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
+              
+              # Retry pushing if failures
+              for i in 1 2 3 4 5; do
+                if git push "https://x-access-token:${PRIVATE_REPO_PAT}@github.com/${CURRENT_TARGET_REPO}.git" "${DEFAULT_BRANCH}"; then
+                  echo "Push succeeded."
+                  break
+                else
+                  echo "Push failed, fetching and rebasing..."
+                  git fetch origin "${DEFAULT_BRANCH}"
+                  if ! git rebase origin/"${DEFAULT_BRANCH}"; then
+                    git checkout --ours public/search-index.json 2>/dev/null || true
+                    git add public/search-index.json 2>/dev/null || true
+                    git rebase --continue || git rebase --skip
+                  fi
+                  sleep 2
+                fi
+              done
+            fi
+            
+            echo "Finished processing $ACCOUNT"
+            echo ""
+          done
+          
+          # Force save the UPDATED_GROUP once more dynamically just to be safe
+          gh secret set PRIVATE_REPO_GROUP --body "${UPDATED_GROUP}" --repo "${MAIN_REPO}"
