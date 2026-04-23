@@ -76,8 +76,9 @@ jobs:
           MAIN_REPO="${GITHUB_REPOSITORY:-qyzenatrix/qorvexian_zylortiq}"
           export GH_TOKEN="${PRIVATE_REPO_PAT}"
           
-          # Read comma separated list
-          IFS=',' read -ra PAIRS <<< "$PRIVATE_REPO_GROUP"
+          # Read comma or newline separated list
+          CLEAN_GROUP=$(echo "$PRIVATE_REPO_GROUP" | tr -d '\r' | tr '\n' ',')
+          IFS=',' read -ra PAIRS <<< "$CLEAN_GROUP"
           for PAIR in "${PAIRS[@]}"; do
             # Trim whitespace
             PAIR=$(echo "$PAIR" | xargs)
@@ -165,6 +166,10 @@ jobs:
             export SYNC_ACCOUNT="$ACCOUNT"
 
             node sync-multi.js
+            
+            # Ensure we ignore node_modules and scripts from being synced into the repo
+            echo "node_modules/" >> .gitignore
+            echo "package-lock.json" >> .gitignore
 
             git config user.name "Email Sync Bot"
             git config user.email "bot@sync"
