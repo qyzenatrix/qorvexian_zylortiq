@@ -61,12 +61,24 @@ function sanitizeFilename(filename) {
  */
 function normalizeFolder(folder) {
   const f = folder.toLowerCase();
+
+  // If it's exactly inbox
+  if (f === 'inbox') return 'inbox';
+
+  // Specific strict mappings for standard folders
   if (f.includes('sent')) return 'sent';
   if (f.includes('drafts')) return 'drafts';
   if (f.includes('trash') || f.includes('bin')) return 'trash';
   if (f.includes('junk') || f.includes('spam')) return 'junk';
-  if (f.includes('inbox')) return 'inbox';
-  return f.replace(/[^a-z0-9_-]/g, '');
+
+  // Handle nested folders under INBOX (e.g., INBOX.Customer -> Customer)
+  let customName = f;
+  if (f.startsWith('inbox.')) {
+    customName = f.substring('inbox.'.length);
+  }
+
+  // Remove invalid characters to keep purely standard characters
+  return customName.replace(/[^a-z0-9_-]/g, '');
 }
 
 /**
