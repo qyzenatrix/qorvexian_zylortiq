@@ -65,7 +65,8 @@ function normalizeFolder(folder) {
   if (f.includes('drafts')) return 'drafts';
   if (f.includes('trash') || f.includes('bin')) return 'trash';
   if (f.includes('junk') || f.includes('spam')) return 'junk';
-  return 'inbox';
+  if (f.includes('inbox')) return 'inbox';
+  return f.replace(/[^a-z0-9_-]/g, '');
 }
 
 /**

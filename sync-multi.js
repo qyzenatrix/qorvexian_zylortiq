@@ -247,9 +247,9 @@ async function syncAll() {
     cutoffDate.setDate(cutoffDate.getDate() - (SYNC_DAYS + 1));
     
     // Auto-Rollover Trigger
-    if (totalLoadedEmails > 19000) {
+    if (totalLoadedEmails > 17000) {
         console.log(`\n======================================================`);
-        console.log(`File count exceeds 19000 limit. Initiating automated repository rollover...`);
+        console.log(`File count exceeds 17000 limit. Initiating automated repository rollover...`);
         console.log(`======================================================`);
         try {
             execSync('node rollover.js', { stdio: 'inherit' });

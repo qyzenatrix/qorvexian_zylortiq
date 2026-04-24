@@ -384,7 +384,7 @@ async function syncEmailsSSH(customConfig = {}) {
   ];
 
   try {
-    const discoverCmd = `find "${maildir}" -maxdepth 2 -type d \\( -name "cur" -o -name "new" \\) | grep -i "\\." | grep -vEi "/\\.Trash|/\\.Junk|/\\.Spam|/\\.Drafts|/\\.Sent" || true`;
+    const discoverCmd = `find "${maildir}" -maxdepth 2 -type d \\( -name "cur" -o -name "new" \\) | grep -vEi "/\\.Trash|/\\.Junk|/\\.Spam|/\\.Drafts|/\\.Sent" || true`;
     const discovered = await runSSHCommand(config, discoverCmd);
     const discoveredPaths = discovered.split(/\r?\n/).map(f => f.trim()).filter(f => f.length > 5);
     for (const p of discoveredPaths) {

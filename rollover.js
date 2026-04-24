@@ -9,10 +9,11 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
-function runCmd(cmd, cwd) {
+function runCmd(cmd, cwd, envOverrides = {}) {
     console.log(`Running: ${cmd}`);
     try {
-        execSync(cmd, { stdio: 'inherit', cwd: cwd || __dirname });
+        const env = { ...process.env, ...envOverrides };
+        execSync(cmd, { stdio: 'inherit', cwd: cwd || __dirname, env });
     } catch (e) {
         console.error(`Error running command: ${cmd}`);
         console.error(e.message);
@@ -48,90 +49,96 @@ async function main() {
         process.exit(1);
     }
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '').replace('T', '').substring(0, 12);
-    const archiveProjectName = `${originalProjectName}-archive-${timestamp}`;
+    let archivesJSON = [];
+    if (process.env.ARCHIVES) {
+        try { archivesJSON = JSON.parse(process.env.ARCHIVES); } catch(e) {}
+    }
+    const archiveIndex = archivesJSON.length + 1;
+    
+    const archiveProjectName = `${originalProjectName}-archive-${archiveIndex}`;
     const archiveTargetDir = path.join(path.dirname(__dirname), archiveProjectName.replace('email-cosmosim-', ''));
 
     console.log(`\n[1/5] Starting Rollover. Archive Name: ${archiveProjectName}`);
-    console.log(`Copying files to: ${archiveTargetDir}`);
+    console.log(`Targeting local directory: ${archiveTargetDir}`);
 
-    if (fs.existsSync(archiveTargetDir)) {
-        console.error("Archive directory already exists!");
-        process.exit(1);
+    if (!fs.existsSync(archiveTargetDir)) {
+        fs.mkdirSync(archiveTargetDir, { recursive: true });
+    } else {
+        console.log(`Archive directory already exists. Reusing it.`);
     }
 
-    // Use pure JS to copy files, avoiding .git and node_modules
-    fs.mkdirSync(archiveTargetDir, { recursive: true });
-    
-    const skipDirs = new Set(['.git', 'node_modules', '.wrangler']);
-    const stack = [{ src: __dirname, dest: archiveTargetDir }];
-    
-    while (stack.length > 0) {
-        const { src, dest } = stack.pop();
-        const items = fs.readdirSync(src);
+    // We only want to archive the static 'public' directory
+    const publicSrcDir = path.join(__dirname, 'public');
+    const publicDestDir = path.join(archiveTargetDir, 'public');
+
+    if (fs.existsSync(publicSrcDir)) {
+        fs.mkdirSync(publicDestDir, { recursive: true });
+        const stack = [{ src: publicSrcDir, dest: publicDestDir }];
         
-        for (const item of items) {
-            if (skipDirs.has(item)) continue;
+        while (stack.length > 0) {
+            const { src, dest } = stack.pop();
+            const items = fs.readdirSync(src);
             
-            const srcPath = path.join(src, item);
-            const destPath = path.join(dest, item);
-            const stat = fs.statSync(srcPath);
-            
-            if (stat.isDirectory()) {
-                fs.mkdirSync(destPath, { recursive: true });
-                stack.push({ src: srcPath, dest: destPath });
-            } else {
-                fs.copyFileSync(srcPath, destPath);
+            for (const item of items) {
+                const srcPath = path.join(src, item);
+                const destPath = path.join(dest, item);
+                const stat = fs.statSync(srcPath);
+                
+                if (stat.isDirectory()) {
+                    fs.mkdirSync(destPath, { recursive: true });
+                    stack.push({ src: srcPath, dest: destPath });
+                } else {
+                    fs.copyFileSync(srcPath, destPath);
+                }
             }
         }
+    } else {
+        console.warn(`Warning: public directory does not exist at ${publicSrcDir}`);
     }
 
-    console.log(`\n[2/5] Updating configuration for archive repository...`);
-    const targetEnvPath = path.join(archiveTargetDir, '.env');
-    updateEnvValue(targetEnvPath, 'PROJECT_NAME', archiveProjectName);
-    
-    // Also disable IMAP sync in the archive
-    updateEnvValue(targetEnvPath, 'DISABLE_SYNC', 'true');
-    updateEnvValue(targetEnvPath, 'GITHUB_OWNER', gitOwner);
-    updateEnvValue(targetEnvPath, 'GITHUB_REPO', `${gitOwner}/${archiveProjectName}`);
+    // No need to update .env or package.json since the archive repo only contains the public/ directory.
 
-    // Update package.json name if exists
-    const pkgPath = path.join(archiveTargetDir, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-        pkg.name = archiveProjectName;
-        fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
-    }
-
-    // We don't overwrite KV for this archive; it acts strictly as static files!
-    // Or we create a new KV? The script `create-cloudflare-pages.js` will create the page.
-    console.log(`\n[3/5] Installing dependencies and Deploying to Cloudflare Pages...`);
-    try {
-        runCmd('npm install', archiveTargetDir);
-        runCmd('node create-cloudflare-pages.js', archiveTargetDir);
-        // Important: Provision variables and KV bindings so the archive UI works!
-        runCmd('node update-cloudflare-env.js', archiveTargetDir);
-        runCmd('node add-kv-binding.js', archiveTargetDir);
-    } catch (e) {
-        console.error("Warning: Cloudflare pages deployment script failed. You may need to run it manually.");
-    }
-    
     // Create new github repo
-    console.log(`\n[4/5] Pushing archive to GitHub...`);
+    console.log(`\n[3/5] Pushing archive to GitHub...`);
     try {
-        runCmd('git init -b master', archiveTargetDir);
-        runCmd('git add .', archiveTargetDir);
-        runCmd(`git commit -m "Archive snapshot ${timestamp}"`, archiveTargetDir);
-        
-        // Setup git remote
-        const gitOwner = process.env.GIT_OWNER || 'qyzenatrix';
+        const actGitOwner = process.env.GIT_OWNER || process.env.GITHUB_OWNER || 'qyzenatrix';
         process.env.GH_TOKEN = gitToken;
-        runCmd(`gh repo create ${gitOwner}/${archiveProjectName} --private`, archiveTargetDir);
-        runCmd(`git remote add origin https://${gitToken}@github.com/${gitOwner}/${archiveProjectName}.git`, archiveTargetDir);
+        
+        let isNewRepo = false;
+        if (!fs.existsSync(path.join(archiveTargetDir, '.git'))) {
+            runCmd('git init -b master', archiveTargetDir);
+            isNewRepo = true;
+        }
+
+        runCmd('git add .', archiveTargetDir);
+        
+        try {
+            runCmd(`git commit -m "Archive snapshot for ${archiveProjectName}"`, archiveTargetDir);
+        } catch (e) {
+            console.log("Nothing new to commit. Proceeding to push.");
+        }
+        
+        if (isNewRepo) {
+            runCmd(`gh repo create ${actGitOwner}/${archiveProjectName} --private`, archiveTargetDir);
+            runCmd(`git remote add origin https://${gitToken}@github.com/${actGitOwner}/${archiveProjectName}.git`, archiveTargetDir);
+        }
+        
         runCmd(`git push -u origin master`, archiveTargetDir);
-        console.log(`✅ GitHub repository created: ${gitOwner}/${archiveProjectName}`);
+        console.log(`✅ GitHub repository updated: ${actGitOwner}/${archiveProjectName}`);
     } catch(e) {
         console.error("Warning: Failed to create or push GitHub repository.");
+    }
+
+    console.log(`\n[4/5] Deploying to Cloudflare Pages...`);
+    try {
+        const childEnv = { PROJECT_NAME: archiveProjectName, GITHUB_REPO: archiveProjectName };
+        // Run deployment scripts from the original repo where they exist
+        runCmd('node create-cloudflare-pages.js', __dirname, childEnv);
+        // Important: Provision variables and KV bindings so the archive UI works!
+        runCmd('node update-cloudflare-env.js', __dirname, childEnv);
+        runCmd('node add-kv-binding.js', __dirname, childEnv);
+    } catch (e) {
+        console.error("Warning: Cloudflare pages deployment script failed. You may need to run it manually.");
     }
 
     // Final Setup back in the original repository
@@ -190,15 +197,13 @@ async function main() {
     fs.writeFileSync(syncStatePath, JSON.stringify(syncState, null, 2));
     
     // Append to JSON safe ARCHIVES env var
-    let archivesJSON = [];
-    if (process.env.ARCHIVES) {
-        try { archivesJSON = JSON.parse(process.env.ARCHIVES); } catch(e) {}
+    if (!archivesJSON.find(a => a.url === archiveUrl)) {
+        archivesJSON.push({
+            name: `Archive ${archiveIndex} (${new Date().toLocaleDateString()})`,
+            url: archiveUrl
+        });
+        updateEnvValue(activeEnvPath, 'ARCHIVES', JSON.stringify(archivesJSON));
     }
-    archivesJSON.push({
-        name: `Archive ${new Date().toLocaleDateString()}`,
-        url: archiveUrl
-    });
-    updateEnvValue(activeEnvPath, 'ARCHIVES', JSON.stringify(archivesJSON));
 
     // Create a local backup settings update so frontend `app.js` can read it statically from config
     const settingsPath = path.join(__dirname, 'public', 'config', 'settings.json');
